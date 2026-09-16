@@ -1,0 +1,262 @@
+# -*- coding: utf-8 -*-
+"""
+tests/test_game.py —— “一箭又一箭”自动化测试
+
+覆盖作业要求的测试项：
+  T01 点击前方无阻挡的箭头         -> 箭头飞出棋盘并消失
+  T02 点击前方有阻挡的箭头         -> 箭头不消失，失误次数减 1
+  T03 点击位于边缘且朝向棋盘外的箭头 -> 箭头正常消失，不发生越界错误
+  T04 消除本关全部箭头             -> 显示通关并进入下一关
+  T05 失误次数耗尽                -> 显示失败并允许重新开始
+  T06 游戏进行中重新开始           -> 箭头布局和失误次数恢复
+
+另外补充：四方向路径检测的单元测试、关卡可解性校验、关卡方向齐全性校验。
+测试中“无阻挡/有阻挡箭头”均从关卡数据中自动推导，关卡调整后无需修改测试。
+
+运行方式（在项目根目录）：
+    python -m unittest discover -s tests -v
+或：
+    python -m pytest tests -v
+"""
+
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from game import Level, Game, solve_order, _blocked, DIRECTIONS, EMPTY
+from levels import LEVELS, MAX_MISTAKES
+
+
+# ---------------------------------------------------------------- 工具函数
+def grid_of(*rows):
+    """把若干行字符串（用空格分隔格子）转换成字符网格。"""
+    return [row.split() for row in rows]
+
+
+def arrow_count(grid):
+    return sum(1 for row in grid for ch in row if ch in DIRECTIONS)
+
+
+def find_free_arrow(grid):
+    """在关卡中找一个“前方无阻挡”的箭头，返回 (r, c)。"""
+    level = Level(grid)
+    for r in range(level.rows):
+        for c in range(level.cols):
+            if level.grid[r][c] in DIRECTIONS and not level.is_blocked(r, c):
+                return r, c
+    raise AssertionError("关卡中找不到无阻挡的箭头")
+
+
+def find_blocked_arrow(grid):
+    """在关卡中找一个“前方有阻挡”的箭头，返回 (r, c)。"""
+    level = Level(grid)
+    for r in range(level.rows):
+        for c in range(level.cols):
+            if level.grid[r][c] in DIRECTIONS and level.is_blocked(r, c):
+                return r, c
+    raise AssertionError("关卡中找不到被阻挡的箭头")
+
+
+# ---------------------------------------------------------------- 路径检测
+class TestPathDetection(unittest.TestCase):
+    """四方向路径检测：无阻挡、有阻挡、边界三种情况。"""
+
+    def test_right_no_block(self):
+        level = Level(grid_of("> . .", ". . .", ". . ."))
+        self.assertFalse(level.is_blocked(0, 0))
+
+    def test_right_blocked_by_any_arrow(self):
+        level = Level(grid_of("> < .", ". . .", ". . ."))
+        self.assertTrue(level.is_blocked(0, 0))
+        level = Level(grid_of("> . <", ". . .", ". . ."))
+        self.assertTrue(level.is_blocked(0, 0))
+
+    def test_left_no_block_and_block(self):
+        level = Level(grid_of(". . <", ". . .", ". . ."))
+        self.assertFalse(level.is_blocked(0, 2))
+        level = Level(grid_of("> . <", ". . .", ". . ."))
+        self.assertTrue(level.is_blocked(0, 2))
+
+    def test_up_no_block_and_block(self):
+        level = Level(grid_of(". . .", "^ . .", ". . ."))
+        self.assertFalse(level.is_blocked(1, 0))      # 上方是空格
+        level = Level(grid_of("^ . .", "^ . .", ". . ."))
+        self.assertTrue(level.is_blocked(1, 0))       # 上方有箭头
+
+    def test_down_no_block_and_block(self):
+        level = Level(grid_of(". . .", "v . .", ". . ."))
+        self.assertFalse(level.is_blocked(1, 0))
+        level = Level(grid_of("v . .", "v . .", ". . ."))
+        self.assertTrue(level.is_blocked(0, 0))
+
+    def test_edge_arrow_no_out_of_bounds(self):
+        """位于边缘且朝向棋盘外的箭头：判断时不能越界，且视为无阻挡。"""
+        # 左上角朝上、右下角朝下、左上角朝左、右上角朝右
+        cases = [
+            (grid_of("^ . .", ". . .", ". . ."), (0, 0)),
+            (grid_of(". . .", ". . .", ". . v"), (2, 2)),
+            (grid_of("< . .", ". . .", ". . ."), (0, 0)),
+            (grid_of(". . >", ". . .", ". . ."), (0, 2)),
+        ]
+        for grid, (r, c) in cases:
+            level = Level(grid)
+            self.assertFalse(level.is_blocked(r, c))
+            result, _ = level.click(r, c)
+            self.assertEqual(result, "fly")
+
+
+# ---------------------------------------------------------------- 作业测试项
+class TestHomeworkCases(unittest.TestCase):
+    """对应作业 T01 - T06。"""
+
+    def test_t01_click_unblocked_arrow_fly(self):
+        """T01：点击前方无阻挡的箭头 -> 箭头飞出棋盘并消失。"""
+        level = Level(LEVELS[0])
+        r, c = find_free_arrow(LEVELS[0])
+        before = level.remaining_arrows()
+        result, _ = level.click(r, c)
+        self.assertEqual(result, "fly")
+        self.assertEqual(level.grid[r][c], EMPTY)
+        self.assertEqual(level.remaining_arrows(), before - 1)
+
+    def test_t02_click_blocked_arrow(self):
+        """T02：点击前方有阻挡的箭头 -> 箭头不消失，失误次数减 1。"""
+        level = Level(LEVELS[0])
+        r, c = find_blocked_arrow(LEVELS[0])
+        before = level.remaining_arrows()
+        self.assertTrue(level.is_blocked(r, c))
+        result, remaining = level.click(r, c)
+        self.assertEqual(result, "blocked")
+        self.assertEqual(remaining, level.max_mistakes - 1)
+        self.assertIn(level.grid[r][c], DIRECTIONS)   # 箭头仍在
+        self.assertEqual(level.remaining_arrows(), before)
+
+    def test_t03_edge_arrow_facing_outside(self):
+        """T03：点击位于边缘且朝向棋盘外的箭头 -> 正常消失，不发生越界错误。"""
+        level = Level(grid_of("^ . .", ". . .", ". . v"))
+        result1, _ = level.click(0, 0)                # 左上角朝上
+        result2, _ = level.click(2, 2)                # 右下角朝下
+        self.assertEqual(result1, "fly")
+        self.assertEqual(result2, "fly")
+        self.assertEqual(level.remaining_arrows(), 0)
+
+    def test_t04_clear_all_arrows_show_clear_and_next(self):
+        """T04：消除本关全部箭头 -> 显示通关并进入下一关。"""
+        game = Game([Level(LEVELS[0]), Level(LEVELS[1])])
+        order = solve_order(LEVELS[0])                # 按求解器给出的可行顺序点击
+        self.assertIsNotNone(order)
+        for r, c in order:
+            result, _ = game.click(r, c)
+            self.assertEqual(result, "fly")
+        self.assertEqual(game.state, Game.LEVEL_CLEAR)   # 显示通关
+        game.next_level()                                 # 进入下一关
+        self.assertEqual(game.level_no, 2)
+        self.assertEqual(game.state, Game.PLAYING)
+        self.assertEqual(game.current.remaining_arrows(), arrow_count(LEVELS[1]))
+
+    def test_t04_last_level_all_clear(self):
+        """最后一关清空 -> 显示“全部通关”。"""
+        game = Game([Level(LEVELS[-1])])
+        order = solve_order(LEVELS[-1])
+        self.assertIsNotNone(order)
+        for r, c in order:
+            game.click(r, c)
+        self.assertEqual(game.state, Game.ALL_CLEAR)
+
+    def test_t05_mistakes_exhausted_fail_and_retry(self):
+        """T05：失误次数耗尽 -> 显示失败并允许重新开始。"""
+        game = Game([Level(LEVELS[0])])
+        r, c = find_blocked_arrow(LEVELS[0])
+        max_m = game.current.max_mistakes
+        for i in range(max_m):                        # 连续点击被阻挡的箭头
+            result, remaining = game.click(r, c)
+            self.assertEqual(result, "blocked")
+        self.assertEqual(remaining, 0)
+        self.assertEqual(game.state, Game.FAILED)      # 显示失败
+        game.restart_level()                           # 重新开始
+        self.assertEqual(game.state, Game.PLAYING)
+        self.assertEqual(game.current.mistakes, game.current.max_mistakes)
+        self.assertEqual(game.current.remaining_arrows(), arrow_count(LEVELS[0]))
+
+    def test_t06_restart_restores_layout_and_mistakes(self):
+        """T06：游戏进行中重新开始 -> 箭头布局和失误次数恢复。"""
+        game = Game([Level(LEVELS[0])])
+        fr, fc = find_free_arrow(LEVELS[0])
+        result, _ = game.click(fr, fc)    # 消除一个无阻挡箭头
+        self.assertEqual(result, "fly")
+
+        # 消除后，在“当前状态”中找一个仍被阻挡的箭头再点击（失误一次）
+        cur = game.current
+        blocked = [(r, c) for r in range(cur.rows) for c in range(cur.cols)
+                   if cur.grid[r][c] in DIRECTIONS and cur.is_blocked(r, c)]
+        self.assertTrue(blocked, "消除一个箭头后关卡中没有仍被阻挡的箭头")
+        br, bc = blocked[0]
+        result, _ = game.click(br, bc)
+        self.assertEqual(result, "blocked")
+
+        self.assertEqual(game.current.remaining_arrows(), arrow_count(LEVELS[0]) - 1)
+        self.assertEqual(game.current.mistakes, game.current.max_mistakes - 1)
+
+        game.restart_level()
+        self.assertEqual(game.current.grid, [list(r) for r in LEVELS[0]])  # 布局恢复
+        self.assertEqual(game.current.mistakes, game.current.max_mistakes)  # 失误恢复
+        self.assertEqual(game.state, Game.PLAYING)
+
+
+# ---------------------------------------------------------------- 关卡质量
+class TestLevels(unittest.TestCase):
+    """关卡数据质量：尺寸一致、可通关、包含四种方向、难度递增。"""
+
+    def test_all_levels_solvable(self):
+        """每个关卡都必须存在合理的通关顺序。"""
+        for i, grid in enumerate(LEVELS):
+            self.assertIsNotNone(
+                solve_order(grid),
+                msg="关卡 %d 无法通关！" % (i + 1),
+            )
+
+    def test_all_levels_rectangular(self):
+        for i, grid in enumerate(LEVELS):
+            widths = {len(row) for row in grid}
+            self.assertEqual(len(widths), 1, msg="关卡 %d 不是矩形棋盘" % (i + 1))
+
+    def test_all_levels_have_four_directions(self):
+        """每个关卡都应包含上、下、左、右四种方向的箭头。"""
+        for i, grid in enumerate(LEVELS):
+            dirs = {ch for row in grid for ch in row if ch in DIRECTIONS}
+            self.assertEqual(dirs, set("^v<>"), msg="关卡 %d 缺少某些方向的箭头" % (i + 1))
+
+    def test_mistakes_config_matches_levels(self):
+        self.assertEqual(len(MAX_MISTAKES), len(LEVELS))
+
+    def test_every_level_has_free_arrow(self):
+        """每个关卡开局都至少有一个可直接飞出的箭头（否则不可能通关）。"""
+        for i, grid in enumerate(LEVELS):
+            self.assertIsNotNone(find_free_arrow(grid), msg="关卡 %d 开局无路可走" % (i + 1))
+
+    def test_every_level_has_blocked_arrow(self):
+        """除入门关外，大部分关卡都应存在被阻挡的箭头（保证有碰撞玩法）。"""
+        for i, grid in enumerate(LEVELS[1:], start=2):
+            self.assertIsNotNone(find_blocked_arrow(grid),
+                                 msg="关卡 %d 没有任何被阻挡的箭头" % i)
+
+    def test_solver_finds_valid_order(self):
+        """求解器给出的点击顺序必须每一步都合法（即每一步箭头前方均无阻挡）。"""
+        for grid in LEVELS:
+            order = solve_order(grid)
+            self.assertIsNotNone(order)
+            g = [list(row) for row in grid]
+            for r, c in order:
+                self.assertIn(g[r][c], DIRECTIONS)
+                self.assertFalse(
+                    _blocked(g, r, c),
+                    msg="求解顺序中 (%d,%d) 的箭头在步骤中仍有阻挡" % (r, c),
+                )
+                g[r][c] = EMPTY
+            self.assertTrue(all(ch not in DIRECTIONS for row in g for ch in row))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
