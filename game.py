@@ -1,0 +1,206 @@
+# -*- coding: utf-8 -*-
+"""
+game.py —— “一箭又一箭”核心游戏逻辑
+
+本模块只包含与界面无关的规则与状态：
+  - 棋盘（二维网格）与箭头方向
+  - 四方向路径检测（是否被其他箭头阻挡）
+  - 点击处理（飞出 / 被阻挡 / 空白格）
+  - 多关卡流程（通关、失败、重新开始、进入下一关）
+  - 关卡可解性校验（用于设计关卡时保证一定能通关）
+
+不依赖 pygame，因此可以独立进行单元测试。
+"""
+
+from copy import deepcopy
+
+# 方向字符 -> (行方向偏移, 列方向偏移)
+# 行坐标向下增加，列坐标向右增加
+DIRECTIONS = {
+    "^": (-1, 0),   # 上
+    "v": (1, 0),    # 下
+    "<": (0, -1),   # 左
+    ">": (0, 1),    # 右
+}
+
+EMPTY = "."   # 空格子
+
+
+def _blocked(grid, r, c):
+    """
+    判断 (r, c) 位置上的箭头，沿其前进方向到棋盘边界之间是否存在其他箭头。
+
+    实现思路：
+      1. 从箭头所在的格子出发，沿方向 (dr, dc) 一格一格向前走；
+      2. 每走一步先检查是否越界，越界说明前方直达边界，返回 False；
+      3. 若途中遇到任意箭头，说明被阻挡，返回 True。
+
+    边界条件用“先判断是否越界、再访问格子”的顺序保证不会发生数组越界，
+    因此位于边缘且朝向棋盘外的箭头（如左上角朝上的箭头）也能安全判断。
+    """
+    rows = len(grid)
+    cols = len(grid[0])
+    ch = grid[r][c]
+    dr, dc = DIRECTIONS[ch]
+    rr, cc = r + dr, c + dc
+    while 0 <= rr < rows and 0 <= cc < cols:
+        if grid[rr][cc] in DIRECTIONS:
+            return True
+        rr += dr
+        cc += dc
+    return False
+
+
+def solve_order(grid):
+    """
+    校验一个关卡是否可通关，若可通关则返回一个可行的点击顺序（列表，元素为 (r, c)）。
+
+    原理：
+      消除一个箭头只会移除障碍，永远不会给其他箭头新增障碍，
+      因此“每次任意点击一个当前未被阻挡的箭头”的贪心策略是正确的：
+      只要按某种顺序能全部消除，贪心过程就一定能全部消除；
+      若贪心过程中某一步没有任何箭头可消除，则说明该关卡必然无法通关。
+    """
+    g = [list(row) for row in grid]
+    order = []
+    while True:
+        # 找出所有当前未被阻挡的箭头
+        candidates = []
+        for r in range(len(g)):
+            for c in range(len(g[0])):
+                if g[r][c] in DIRECTIONS and not _blocked(g, r, c):
+                    candidates.append((r, c))
+        if not candidates:
+            # 若棋盘上已无箭头，说明全部消除成功；否则为死局
+            remain = [g[r][c] for row in g for c in range(len(g[0])) if g[r][c] in DIRECTIONS]
+            if not remain:
+                return order
+            return None
+        r, c = candidates[0]
+        g[r][c] = EMPTY
+        order.append((r, c))
+
+
+class Level:
+    """单个关卡：保存棋盘初始状态、失误次数，并处理一次点击。"""
+
+    def __init__(self, grid, max_mistakes=3):
+        self._initial_grid = [list(row) for row in grid]
+        self.max_mistakes = max_mistakes
+        self.reset()
+
+    # ---------- 状态查询 ----------
+
+    def reset(self):
+        """恢复本关初始状态：棋盘与失误次数全部还原。"""
+        self.grid = deepcopy(self._initial_grid)
+        self.mistakes = self.max_mistakes
+
+    @property
+    def rows(self):
+        return len(self.grid)
+
+    @property
+    def cols(self):
+        return len(self.grid[0])
+
+    def in_bounds(self, r, c):
+        return 0 <= r < self.rows and 0 <= c < self.cols
+
+    def initial_dir(self, r, c):
+        """读取初始棋盘上 (r, c) 处的箭头方向（用于飞出动画等界面逻辑）。"""
+        if self.in_bounds(r, c):
+            return self._initial_grid[r][c]
+        return EMPTY
+
+    def remaining_arrows(self):
+        """当前棋盘上剩余箭头数量。"""
+        return sum(1 for row in self.grid for ch in row if ch in DIRECTIONS)
+
+    def cleared(self):
+        """本关是否已清空全部箭头。"""
+        return self.remaining_arrows() == 0
+
+    def is_blocked(self, r, c):
+        """供外部使用的路径检测接口，委托给模块级函数。"""
+        return _blocked(self.grid, r, c)
+
+    # ---------- 点击处理 ----------
+
+    def click(self, r, c):
+        """
+        玩家点击 (r, c) 格子。
+
+        返回 (结果, 附加信息)：
+          ("empty",   None)          点击了空白格或越界，无任何效果
+          ("fly",     None)          箭头前方无阻挡，箭头飞出并消失
+          ("blocked", 剩余失误次数)   箭头被阻挡，不能消失，失误次数减 1
+        """
+        if not self.in_bounds(r, c):
+            return ("empty", None)
+        if self.grid[r][c] not in DIRECTIONS:
+            return ("empty", None)
+        if self.is_blocked(r, c):
+            self.mistakes -= 1
+            return ("blocked", self.mistakes)
+        self.grid[r][c] = EMPTY
+        return ("fly", None)
+
+
+class Game:
+    """多关卡游戏流程：当前关卡、通关/失败状态、关卡切换。"""
+
+    # 游戏状态
+    PLAYING = "PLAYING"        # 游戏中
+    LEVEL_CLEAR = "LEVEL_CLEAR"  # 本关通关，可进入下一关
+    ALL_CLEAR = "ALL_CLEAR"    # 全部关卡通关
+    FAILED = "FAILED"          # 本关失败（失误次数耗尽）
+
+    def __init__(self, levels):
+        self.levels = levels
+        self.level_index = 0
+        self.current = levels[0]
+        self.state = self.PLAYING
+
+    # ---------- 状态查询 ----------
+
+    @property
+    def level_no(self):
+        return self.level_index + 1
+
+    @property
+    def total_levels(self):
+        return len(self.levels)
+
+    def is_last_level(self):
+        return self.level_index == len(self.levels) - 1
+
+    # ---------- 流程控制 ----------
+
+    def click(self, r, c):
+        """
+        处理一次点击，并根据结果自动更新游戏状态。
+        返回与 Level.click 相同的结果，供界面层做动画。
+        """
+        result, remaining = self.current.click(r, c)
+        if result == "fly" and self.current.cleared():
+            # 清空本关全部箭头 -> 通关；最后一关则全部通关
+            if self.is_last_level():
+                self.state = self.ALL_CLEAR
+            else:
+                self.state = self.LEVEL_CLEAR
+        elif result == "blocked" and remaining == 0:
+            # 失误次数耗尽 -> 本关失败
+            self.state = self.FAILED
+        return result, remaining
+
+    def next_level(self):
+        """从通关界面进入下一关。"""
+        self.level_index += 1
+        self.current = self.levels[self.level_index]
+        self.state = self.PLAYING
+
+    def restart_level(self):
+        """重新开始当前关卡，恢复到初始棋盘与失误次数。"""
+        self.current.reset()
+        self.state = self.PLAYING
