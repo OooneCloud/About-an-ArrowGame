@@ -90,7 +90,7 @@ def main():
     app.render(screen, pygame.time.get_ticks())
     save(screen, "fly_animation.png")
 
-    # 5) 通关界面：用求解器顺序清空第 1 关
+    # 5) 通关界面：用求解器顺序清空第 1 关（未消耗时间，显示 3 星）
     app.game.restart_level()
     app.popups.clear()
     app.shake_anims.clear()
@@ -107,10 +107,23 @@ def main():
     app.game.current = app.game.levels[1]
     app.game.current.mistakes = 0
     app.game.state = Game.FAILED
+    app.game.fail_reason = "mistakes"
     app.render(screen, pygame.time.get_ticks())
     save(screen, "failed.png")
 
-    # 7) 全部通关界面（放在最后一关）
+    # 6b) 超时失败界面：时间耗尽
+    app.start_game()
+    app.game.current.remaining = 0.2
+    app.game.tick(1.0)                     # 时间耗尽 -> FAILED(timeout)
+    assert app.game.state == Game.FAILED and app.game.fail_reason == "timeout"
+    app.render(screen, pygame.time.get_ticks())
+    save(screen, "timeout.png")
+
+    # 7) 全部通关界面：构造全部关卡已清空，显示总星数
+    app.start_game()
+    for lv in app.game.levels:
+        lv.grid = [["." for _ in range(lv.cols)] for _ in range(lv.rows)]  # 已清空
+        lv.remaining = lv.time_limit * 0.5              # 用时 50%，全部 3 星 -> 15/15
     app.game.level_index = app.game.total_levels - 1
     app.game.current = app.game.levels[app.game.level_index]
     app.game.state = Game.ALL_CLEAR
@@ -118,6 +131,9 @@ def main():
     save(screen, "all_clear.png")
 
     # 8) 第 5 关游戏界面（8x8 高密度棋盘）
+    app.start_game()
+    app.game.level_index = app.game.total_levels - 1
+    app.game.current = app.game.levels[app.game.level_index]
     app.game.state = Game.PLAYING
     app.render(screen, pygame.time.get_ticks())
     save(screen, "game_level5.png")

@@ -56,8 +56,11 @@ def main():
     total_frames = frame + 46
 
     frames = []
+    last = pygame.time.get_ticks()
     for i in range(total_frames):
         now = pygame.time.get_ticks()
+        dt = min((now - last) / 1000.0, 0.25)   # 真实时间流逝（限时倒计时）
+        last = now
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -76,7 +79,7 @@ def main():
                 if btn:
                     app.handle_click(btn.rect.center)
 
-        app.update(now)
+        app.update(now, dt)
         app.render(screen, now)
         pygame.display.flip()
         clock.tick(FPS)

@@ -7,6 +7,7 @@ game.py —— “一箭又一箭”核心游戏逻辑
   - 四方向路径检测（是否被其他箭头阻挡）
   - 点击处理（飞出 / 被阻挡 / 空白格）
   - 多关卡流程（通关、失败、重新开始、进入下一关）
+  - 每关限时倒计时（超时失败）与星级评分（按用时 + 失误评定 1~3 星）
   - 关卡可解性校验（用于设计关卡时保证一定能通关）
 
 不依赖 pygame，因此可以独立进行单元测试。
@@ -82,19 +83,26 @@ def solve_order(grid):
 
 
 class Level:
-    """单个关卡：保存棋盘初始状态、失误次数，并处理一次点击。"""
+    """单个关卡：保存棋盘初始状态、失误次数与限时，并处理一次点击。"""
 
-    def __init__(self, grid, max_mistakes=3):
+    def __init__(self, grid, max_mistakes=3, time_limit=60):
         self._initial_grid = [list(row) for row in grid]
         self.max_mistakes = max_mistakes
+        self.time_limit = float(time_limit)   # 限时时长（秒）
         self.reset()
 
     # ---------- 状态查询 ----------
 
     def reset(self):
-        """恢复本关初始状态：棋盘与失误次数全部还原。"""
+        """恢复本关初始状态：棋盘、失误次数与剩余时间全部还原。"""
         self.grid = deepcopy(self._initial_grid)
         self.mistakes = self.max_mistakes
+        self.remaining = self.time_limit      # 剩余时间（秒）
+
+    @property
+    def elapsed(self):
+        """本关已用时间（秒） = 限时 - 剩余时间。"""
+        return self.time_limit - self.remaining
 
     @property
     def rows(self):
@@ -124,6 +132,28 @@ class Level:
     def is_blocked(self, r, c):
         """供外部使用的路径检测接口，委托给模块级函数。"""
         return _blocked(self.grid, r, c)
+
+    def tick(self, dt):
+        """限时倒计时：剩余时间减去 dt 秒（不小于 0）。"""
+        self.remaining = max(0.0, self.remaining - dt)
+
+    def stars(self):
+        """
+        通关评分：返回 1~3 颗星；未通关返回 0。
+
+        规则（结合用时与失误）：
+          时间分：已用时间 / 限时 <= 60% -> 0；<= 85% -> 1；否则 -> 2
+          失误分：失误 0 次 -> 0；1 次 -> 1；>= 2 次 -> 2
+          星级   = max(1, 3 - max(时间分, 失误分))
+        即：无失误且快速通关 -> 3 星；用时较长或失误 1 次 -> 2 星；其余 -> 1 星。
+        """
+        if not self.cleared():
+            return 0
+        ratio = self.elapsed / self.time_limit
+        time_penalty = 0 if ratio <= 0.6 else (1 if ratio <= 0.85 else 2)
+        used_mistakes = self.max_mistakes - self.mistakes   # mistakes 存的是“剩余”次数
+        mistake_penalty = 0 if used_mistakes == 0 else (1 if used_mistakes == 1 else 2)
+        return max(1, 3 - max(time_penalty, mistake_penalty))
 
     # ---------- 点击处理 ----------
 
@@ -161,6 +191,7 @@ class Game:
         self.level_index = 0
         self.current = levels[0]
         self.state = self.PLAYING
+        self.fail_reason = None      # 失败原因：None / "mistakes"（失误耗尽）/ "timeout"（超时）
 
     # ---------- 状态查询 ----------
 
@@ -175,7 +206,20 @@ class Game:
     def is_last_level(self):
         return self.level_index == len(self.levels) - 1
 
+    def total_stars(self):
+        """全部关卡的总星数（未通关的关卡计 0，满分 = 关卡数 × 3）。"""
+        return sum(level.stars() for level in self.levels)
+
     # ---------- 流程控制 ----------
+
+    def tick(self, dt):
+        """每帧推进时间：仅游戏中状态倒计时；限时耗尽 -> 超时失败。"""
+        if self.state != self.PLAYING:
+            return
+        self.current.tick(dt)
+        if self.current.remaining <= 0:
+            self.state = self.FAILED
+            self.fail_reason = "timeout"
 
     def click(self, r, c):
         """
@@ -192,6 +236,7 @@ class Game:
         elif result == "blocked" and remaining == 0:
             # 失误次数耗尽 -> 本关失败
             self.state = self.FAILED
+            self.fail_reason = "mistakes"
         return result, remaining
 
     def next_level(self):
@@ -199,8 +244,10 @@ class Game:
         self.level_index += 1
         self.current = self.levels[self.level_index]
         self.state = self.PLAYING
+        self.fail_reason = None
 
     def restart_level(self):
-        """重新开始当前关卡，恢复到初始棋盘与失误次数。"""
+        """重新开始当前关卡，恢复到初始棋盘、失误次数与剩余时间。"""
         self.current.reset()
         self.state = self.PLAYING
+        self.fail_reason = None
