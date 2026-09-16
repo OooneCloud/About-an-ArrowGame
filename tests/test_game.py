@@ -10,6 +10,14 @@ tests/test_game.py —— “一箭又一箭”自动化测试
   T05 失误次数耗尽                -> 显示失败并允许重新开始
   T06 游戏进行中重新开始           -> 箭头布局和失误次数恢复
 
+评分机制测试项（后续追加）：
+  T07 限时耗尽                   -> 超时失败
+  T08 无失误且快速通关            -> 3 星
+  T09 用时较长或失误 1 次         -> 2 星
+  T10 用时超 85% 或失误 ≥2 次     -> 1 星
+  T11 重新开始                   -> 剩余时间恢复
+  T12 通关后                     -> 时间停止倒计时
+
 另外补充：四方向路径检测的单元测试、关卡可解性校验、关卡方向齐全性校验。
 测试中“无阻挡/有阻挡箭头”均从关卡数据中自动推导，关卡调整后无需修改测试。
 
@@ -203,6 +211,91 @@ class TestHomeworkCases(unittest.TestCase):
         self.assertEqual(game.current.grid, [list(r) for r in LEVELS[0]])  # 布局恢复
         self.assertEqual(game.current.mistakes, game.current.max_mistakes)  # 失误恢复
         self.assertEqual(game.state, Game.PLAYING)
+
+
+# ---------------------------------------------------------------- 限时与星级
+class TestScoring(unittest.TestCase):
+    """限时倒计时与星级评分（T07 - T12）。"""
+
+    def test_t07_timeout_fails(self):
+        """T07：限时耗尽 -> 本关失败（超时）。"""
+        game = Game([Level(LEVELS[0], time_limit=5)])
+        self.assertEqual(game.state, Game.PLAYING)
+        game.tick(6.0)
+        self.assertEqual(game.state, Game.FAILED)
+        self.assertEqual(game.fail_reason, "timeout")
+
+    def test_t07_no_fail_before_timeout(self):
+        """限时未耗尽时不会失败，剩余时间不会减到负数。"""
+        game = Game([Level(LEVELS[0], time_limit=10)])
+        game.tick(3.0)
+        self.assertEqual(game.state, Game.PLAYING)
+        self.assertAlmostEqual(game.current.remaining, 7.0)
+
+    def test_t08_three_stars_fast_no_mistake(self):
+        """T08：无失误且用时 ≤ 60% 限时 -> 3 星。"""
+        level = Level(LEVELS[0], time_limit=100)
+        level.remaining = 40.0                      # 已用 60 秒 = 60%
+        for r, c in solve_order(LEVELS[0]):
+            result, _ = level.click(r, c)
+            self.assertEqual(result, "fly")
+        self.assertEqual(level.stars(), 3)
+
+    def test_t09_two_stars(self):
+        """T09：用时 70% 无失误 -> 2 星；快通但失误 1 次 -> 2 星。"""
+        # 用时 70%（无失误）
+        level = Level(LEVELS[0], time_limit=100)
+        level.remaining = 30.0
+        for r, c in solve_order(LEVELS[0]):
+            level.click(r, c)
+        self.assertEqual(level.stars(), 2)
+        # 快通但有 1 次失误
+        level2 = Level(LEVELS[0], time_limit=100)
+        level2.remaining = 50.0
+        level2.mistakes = level2.max_mistakes - 1
+        for r, c in solve_order(LEVELS[0]):
+            level2.click(r, c)
+        self.assertEqual(level2.stars(), 2)
+
+    def test_t10_one_star(self):
+        """T10：用时超过 85% 或失误 ≥2 次 -> 1 星。"""
+        # 用时 90%（无失误）
+        level = Level(LEVELS[0], time_limit=100)
+        level.remaining = 10.0
+        for r, c in solve_order(LEVELS[0]):
+            level.click(r, c)
+        self.assertEqual(level.stars(), 1)
+        # 失误 2 次（快通）
+        level2 = Level(LEVELS[0], time_limit=100)
+        level2.remaining = 50.0
+        level2.mistakes = 0
+        for r, c in solve_order(LEVELS[0]):
+            level2.click(r, c)
+        self.assertEqual(level2.stars(), 1)
+
+    def test_t10_not_cleared_zero_star(self):
+        """未通关时星级为 0（不计入总分）。"""
+        level = Level(LEVELS[0])
+        self.assertEqual(level.stars(), 0)
+
+    def test_t11_restart_resets_timer(self):
+        """T11：重新开始 -> 剩余时间恢复为限时。"""
+        game = Game([Level(LEVELS[0])])
+        game.tick(15.0)
+        self.assertLess(game.current.remaining, game.current.time_limit)
+        game.restart_level()
+        self.assertAlmostEqual(game.current.remaining, game.current.time_limit)
+
+    def test_t12_time_pauses_after_clear(self):
+        """T12：通关后时间不再倒计时（评分按通关瞬间冻结）。"""
+        game = Game([Level(LEVELS[0]), Level(LEVELS[1])])
+        for r, c in solve_order(LEVELS[0]):
+            game.click(r, c)
+        self.assertEqual(game.state, Game.LEVEL_CLEAR)
+        before = game.current.remaining
+        game.tick(30.0)
+        self.assertEqual(game.current.remaining, before)
+        self.assertGreaterEqual(game.current.stars(), 1)
 
 
 # ---------------------------------------------------------------- 关卡质量
