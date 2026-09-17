@@ -11,8 +11,12 @@ main.py —— “一箭又一箭”小游戏（pygame 图形界面）
 
 界面结构：
     开始界面 -> 游戏界面 -> 通关 / 失败界面
-    游戏界面顶部 HUD 显示：当前关卡、剩余箭头数量、剩余失误次数、剩余时间、重新开始按钮
-    通关后按“用时 + 失误次数”评定 1~3 颗星
+    游戏界面顶部 HUD 显示：当前关卡、剩余生命（红点）、剩余时间，右上角“重新开始”按钮
+    棋盘下方：撤销 / 提示 / AI求解 功能按钮（各限 3 次，按钮显示剩余次数）
+    通关后按“用时 + 生命消耗 + 撤销次数 + 提示次数”评定 1~5 颗星；使用 AI 求解直接 1 星
+    通关界面延迟到最后一个箭头完全飞出棋盘后再显示
+辅助功能：撤销上一步（3 次）、提示可消除箭头（3 次）、AI 自动求解通关（评分 1 星）
+箭头飞出时有程序生成的“嗖”声效（不依赖外部素材）
 """
 
 import os
@@ -22,7 +26,7 @@ import argparse
 
 import pygame
 
-from game import Game, Level, DIRECTIONS, EMPTY
+from game import Game, Level, DIRECTIONS, EMPTY, solve_order
 from levels import LEVELS, MAX_MISTAKES, TIME_LIMITS
 
 # ---------------------------------------------------------------- 常量
@@ -33,6 +37,7 @@ HUD_H = 64                      # 顶部信息栏高度
 FLY_MS_PER_CELL = 250       # 箭头飞出动画：每格耗时（毫秒），速度恒定
 SHAKE_MS = 480              # 碰撞晃动动画时长（毫秒）
 POPUP_MS = 900              # 提示文字停留时长（毫秒）
+SOLVE_STEP = 0.35           # AI 求解：每步间隔（秒）
 
 # 配色
 COLOR_BG      = (243, 246, 250)   # 背景
@@ -45,6 +50,7 @@ COLOR_PRIMARY = (66, 133, 244)    # 主题蓝
 COLOR_PRIMARY_DK = (52, 108, 206)
 COLOR_DANGER  = (231, 76, 60)
 COLOR_GREEN   = (46, 204, 113)
+COLOR_GOLD    = (243, 156, 18)   # 提示高亮 / 星级金色
 COLOR_OVERLAY = (20, 26, 40)      # 遮罩
 
 # 四种方向的箭头颜色：上红、下蓝、左绿、右橙
@@ -63,10 +69,36 @@ def make_font(size, bold=False):
         ["microsoftyahei", "simhei", "simsun", "arial"], size, bold=bold)
 
 
-def draw_text(surface, text, font, color, center):
-    """在 (center) 处绘制居中的文字，返回绘制后的矩形。"""
+_VIS_CENTER_CACHE = {}   # (text, 字号, 粗体) -> 视觉中心偏移量（像素）
+
+
+def draw_text(surface, text, font, color, center, visual_center=False):
+    """
+    在 (center) 处绘制居中的文字，返回绘制后的矩形。
+    visual_center=True 时按字形实际像素范围做“视觉居中”修正：
+    中文字体的全角标点（如“！”）在边界框内有不对称留白，按边界框居中会整体偏左，
+    修正后文字视觉重心与 (center) 对齐。
+    """
     img = font.render(text, True, color)
     rect = img.get_rect(center=center)
+    if visual_center:
+        key = (text, font.get_height(), font.get_bold())
+        off = _VIS_CENTER_CACHE.get(key)
+        if off is None:
+            w, h = img.get_size()
+            raw = pygame.image.tostring(img, "RGBA")
+            left, right = w, -1
+            for yy in range(h):
+                row = yy * w
+                for xx in range(w):
+                    if raw[(row + xx) * 4 + 3] > 8:   # alpha 可见像素
+                        if xx < left:
+                            left = xx
+                        if xx > right:
+                            right = xx
+            off = ((left + right) / 2 - w / 2) if right >= left else 0.0
+            _VIS_CENTER_CACHE[key] = off
+        rect.centerx = round(center[0] - off)
     surface.blit(img, rect)
     return rect
 
@@ -91,11 +123,36 @@ def draw_star(surface, center, radius, color):
     pygame.draw.polygon(surface, color, pts)
 
 
+def _make_swish_sound():
+    """
+    程序生成一个短促的“嗖”声（频率上扫 + 指数衰减），用于箭头飞出。
+    不依赖任何外部音频素材；mixer 不可用（如无音频设备、冒烟测试）时返回 None。
+    """
+    try:
+        if not pygame.mixer.get_init():
+            return None
+        import array
+        rate = 44100
+        dur = 0.16
+        n = int(rate * dur)
+        samples = array.array("h")
+        for i in range(n):
+            t = i / rate
+            f = 500 + 1500 * (t / dur)              # 500Hz -> 2000Hz 上扫
+            env = (1 - t / dur) ** 1.8               # 衰减包络
+            v = int(12000 * env * math.sin(2 * math.pi * f * t))
+            samples.append(max(-32767, min(32767, v)))
+        return pygame.mixer.Sound(buffer=samples.tobytes())
+    except Exception:
+        return None
+
+
 class Button:
     """简单的文字按钮：记录矩形与文字，由 App 统一绘制并做点击判定。"""
 
     def __init__(self, name, rect, text, font, base_color=COLOR_PRIMARY,
-                 hover_color=COLOR_PRIMARY_DK, text_color=(255, 255, 255)):
+                 hover_color=COLOR_PRIMARY_DK, text_color=(255, 255, 255),
+                 enabled=True):
         self.name = name
         self.rect = pygame.Rect(rect)
         self.text = text
@@ -103,8 +160,14 @@ class Button:
         self.base_color = base_color
         self.hover_color = hover_color
         self.text_color = text_color
+        self.enabled = enabled
 
     def draw(self, surface, mouse_pos):
+        if not self.enabled:
+            # 禁用态：灰色底 + 浅色文字，不响应 hover
+            rounded_rect(surface, self.rect, (185, 192, 202), radius=self.rect.height // 2)
+            draw_text(surface, self.text, self.font, (235, 239, 244), self.rect.center)
+            return
         hover = self.rect.collidepoint(mouse_pos)
         color = self.hover_color if hover else self.base_color
         rounded_rect(surface, self.rect, color, radius=self.rect.height // 2)
@@ -151,6 +214,12 @@ class App:
         self.buttons = {}                 # name -> Button
         self.fonts = {}
         self.mouse_pos = (0, 0)
+        self.hint_cell = None             # 提示高亮的箭头 (r, c)
+        self.solving = False              # AI 求解进行中
+        self.solve_seq = None             # 求解点击顺序
+        self.solve_idx = 0
+        self.solve_timer = 0.0
+        self.snd_fly = _make_swish_sound()   # 箭头飞出音效（程序生成）
 
     # ---------------- 字体缓存 ----------------
     def font(self, size, bold=False):
@@ -168,25 +237,73 @@ class App:
         self.fly_anims.clear()
         self.shake_anims.clear()
         self.popups.clear()
+        self.hint_cell = None
+        self._stop_solve()
         self.mode = "game"
 
+    def _stop_solve(self):
+        """停止 AI 求解并清空相关状态。"""
+        self.solving = False
+        self.solve_seq = None
+        self.solve_idx = 0
+        self.solve_timer = 0.0
+
+    def _start_solve(self):
+        """用贪心求解器算出当前关卡的通关顺序，并开始自动执行。"""
+        seq = solve_order(self.game.current.grid)
+        if not seq:
+            self.popups.append({
+                "text": "当前局面无解，无法自动求解", "x": SCREEN_W // 2,
+                "y": 150, "t0": pygame.time.get_ticks(), "color": COLOR_DANGER,
+            })
+            return
+        self.hint_cell = None
+        self.game.use_ai_solve()      # 标记本关使用了 AI 求解：评分直接 1 星
+        self.solving = True
+        self.solve_seq = seq
+        self.solve_idx = 0
+        self.solve_timer = 0.0
+
     def board_geometry(self):
-        """根据当前关卡的棋盘尺寸计算格子大小与棋盘左上角坐标。"""
+        """根据当前关卡的棋盘尺寸计算格子大小与棋盘左上角坐标（底部预留功能按钮区）。"""
         rows, cols = self.game.current.rows, self.game.current.cols
         margin = 30
-        cell = min(86, (SCREEN_W - 2 * margin) // cols, (SCREEN_H - HUD_H - 2 * margin) // rows)
+        btn_area = 64                       # 底部“撤销/提示/AI求解”按钮区高度
+        cell = min(86, (SCREEN_W - 2 * margin) // cols,
+                   (SCREEN_H - HUD_H - 2 * margin - btn_area) // rows)
         board_w, board_h = cols * cell, rows * cell
         ox = (SCREEN_W - board_w) // 2
-        oy = HUD_H + (SCREEN_H - HUD_H - board_h) // 2
+        oy = HUD_H + (SCREEN_H - HUD_H - btn_area - board_h) // 2
         return rows, cols, cell, ox, oy
 
     # ---------------- 动画更新（按帧推进） ----------------
     def update(self, now, dt=0.0):
         if self.mode == "game" and self.game is not None:
-            self.game.tick(dt)          # 限时倒计时（仅游戏中状态生效）
+            if self.solving:
+                self._advance_solve(dt, now)     # AI 求解期间暂停倒计时
+            else:
+                self.game.tick(dt)               # 限时倒计时（仅游戏中状态生效）
         self.fly_anims = [a for a in self.fly_anims if now - a["t0"] < a["dur"]]
         self.shake_anims = [a for a in self.shake_anims if now - a["t0"] < SHAKE_MS]
         self.popups = [p for p in self.popups if now - p["t0"] < POPUP_MS]
+
+    def _advance_solve(self, dt, now):
+        """AI 求解：按求解器顺序每隔 SOLVE_STEP 秒点击一个箭头，直到通关。"""
+        if self.game.state != Game.PLAYING or self.solve_seq is None:
+            self._stop_solve()
+            return
+        self.solve_timer += dt
+        while self.solve_timer >= SOLVE_STEP and self.game.state == Game.PLAYING:
+            self.solve_timer -= SOLVE_STEP
+            if self.solve_idx >= len(self.solve_seq):
+                self._stop_solve()
+                return
+            r, c = self.solve_seq[self.solve_idx]
+            self.solve_idx += 1
+            if self.game.current.grid[r][c] in DIRECTIONS:
+                self._on_board_click(r, c, now)   # 带动画点击
+        if self.solve_idx >= len(self.solve_seq) or self.game.state != Game.PLAYING:
+            self._stop_solve()
 
     # ---------------- 点击处理 ----------------
     def handle_click(self, pos):
@@ -198,18 +315,35 @@ class App:
 
         # 游戏界面
         if self.game.state == Game.PLAYING:
-            # 重新开始按钮
+            # 重新开始按钮（AI 求解进行中也可用，用于随时中断）
             if self.buttons.get("restart") and self.buttons["restart"].rect.collidepoint(pos):
                 self.game.restart_level()
                 self.fly_anims.clear()
                 self.shake_anims.clear()
                 self.popups.clear()
+                self.hint_cell = None
+                self._stop_solve()
+                return
+            # AI 求解进行中：撤销 / 提示 / AI求解 与棋盘全部禁用（按钮显示置灰）
+            if self.solving:
+                return
+            if self.buttons.get("undo") and self.buttons["undo"].rect.collidepoint(pos) \
+                    and self.game.current.undo_left > 0:
+                self._do_undo()
+                return
+            if self.buttons.get("hint") and self.buttons["hint"].rect.collidepoint(pos) \
+                    and self.game.current.hint_left > 0:
+                self._do_hint()
+                return
+            if self.buttons.get("solve") and self.buttons["solve"].rect.collidepoint(pos):
+                self._start_solve()
                 return
             # 棋盘点击
             rows, cols, cell, ox, oy = self.board_geometry()
             if ox <= pos[0] < ox + cols * cell and oy <= pos[1] < oy + rows * cell:
                 c = (pos[0] - ox) // cell
                 r = (pos[1] - oy) // cell
+                self.hint_cell = None      # 玩家开始手动操作，清除提示
                 self._on_board_click(r, c, now)
         elif self.game.state == Game.LEVEL_CLEAR:
             if self.buttons.get("next") and self.buttons["next"].rect.collidepoint(pos):
@@ -217,20 +351,51 @@ class App:
                 self.fly_anims.clear()
                 self.shake_anims.clear()
                 self.popups.clear()
+                self.hint_cell = None
+                self._stop_solve()
         elif self.game.state == Game.FAILED:
             if self.buttons.get("retry") and self.buttons["retry"].rect.collidepoint(pos):
                 self.game.restart_level()
                 self.fly_anims.clear()
                 self.shake_anims.clear()
                 self.popups.clear()
+                self.hint_cell = None
+                self._stop_solve()
         elif self.game.state == Game.ALL_CLEAR:
             if self.buttons.get("home") and self.buttons["home"].rect.collidepoint(pos):
                 self.mode = "start"
+
+    def _do_undo(self):
+        """撤销上一步，并给出浮动反馈。"""
+        result, pos = self.game.undo()
+        if result is None:
+            return
+        self.hint_cell = None
+        self._stop_solve()
+        self.popups.append({
+            "text": "已撤销上一步", "x": SCREEN_W // 2, "y": 150,
+            "t0": pygame.time.get_ticks(), "color": COLOR_GREEN,
+        })
+
+    def _do_hint(self):
+        """消耗一次提示机会，并高亮一个当前可直接消除的箭头。"""
+        if self.game.current.use_hint() < 0:
+            return
+        cell = self.game.hint()
+        if cell is None:
+            self.popups.append({
+                "text": "当前没有可消除的箭头", "x": SCREEN_W // 2, "y": 150,
+                "t0": pygame.time.get_ticks(), "color": COLOR_DANGER,
+            })
+            return
+        self.hint_cell = cell
 
     def _on_board_click(self, r, c, now):
         result, remaining = self.game.click(r, c)
         if result == "fly":
             # 逻辑层已把该格清空，这里从初始棋盘读取方向并计算飞出距离
+            if self.snd_fly is not None:
+                self.snd_fly.play()       # 箭头飞出音效
             d = self.game.current.initial_dir(r, c)
             dist = self._fly_distance(r, c, d)
             self.fly_anims.append({
@@ -243,7 +408,7 @@ class App:
             cx = ox + c * cell + cell // 2
             cy = oy + r * cell + cell // 2
             self.popups.append({
-                "text": "被挡住了！失误 -1",
+                "text": "被挡住了！生命 -1",
                 "x": cx, "y": cy - cell // 2,
                 "t0": now, "color": COLOR_DANGER,
             })
@@ -284,9 +449,9 @@ class App:
         rules = [
             "规则：",
             "· 点击箭头，检查它前进方向直到棋盘边界之间是否有其他箭头；",
-            "· 前方无阻挡 → 箭头飞出被消除；有阻挡 → 晃动提示并消耗 1 次失误；",
-            "· 清空全部箭头通关，失误次数耗尽或超时则本关失败；",
-            "· 通关后按用时与失误评定 1~3 颗星。",
+            "· 前方无阻挡 → 箭头飞出被消除；有阻挡 → 晃动提示并消耗 1 点生命；",
+            "· 清空全部箭头通关，生命值耗尽或超时则本关失败；",
+            "· 通关后按用时、生命消耗、撤销与提示次数评定 1~5 颗星。",
         ]
         y = 300
         for line in rules:
@@ -300,12 +465,10 @@ class App:
         btn.draw(surface, self.mouse_pos)
         self.buttons["start"] = btn
 
-        draw_text(surface, "共 %d 关 · 失误 %d~%d 次 · 限时 %d~%d 秒" % (
+        draw_text(surface, "共 %d 关 · 生命 %d~%d 点 · 限时 %d~%d 秒" % (
             len(LEVELS), min(MAX_MISTAKES), max(MAX_MISTAKES),
             min(TIME_LIMITS), max(TIME_LIMITS)),
             self.font(18), COLOR_SUB, (center_x, 600))
-        draw_text(surface, "软件工程第二次作业 · 使用 pygame 开发",
-                  self.font(16), COLOR_SUB, (center_x, 640))
 
     def _render_game(self, surface, now):
         game = self.game
@@ -317,17 +480,15 @@ class App:
         pygame.draw.line(surface, COLOR_BOARD_BD, (0, HUD_H), (SCREEN_W, HUD_H), 2)
         draw_text(surface, "第 %d / %d 关" % (game.level_no, game.total_levels),
                   self.font(26, True), COLOR_TEXT, (90, HUD_H // 2))
-        draw_text(surface, "剩余箭头：%d" % game.current.remaining_arrows(),
-                  self.font(22), COLOR_TEXT, (250, HUD_H // 2))
 
-        # 剩余失误次数（红心显示）
-        self._draw_mistakes(surface, 345, HUD_H // 2, game.current)
+        # 剩余生命值（红点显示，不显示数量文字）
+        self._draw_lives(surface, 230, HUD_H // 2, game.current)
 
-        # 剩余时间（≤10 秒变红提示）
+        # 剩余时间（≤10 秒变红提示；右移避免与生命值红点过近）
         remain_sec = math.ceil(max(0.0, game.current.remaining))
         time_color = COLOR_DANGER if remain_sec <= 10 else COLOR_TEXT
         draw_text(surface, "时间：%d 秒" % remain_sec,
-                  self.font(22, True), time_color, (565, HUD_H // 2))
+                  self.font(22, True), time_color, (455, HUD_H // 2))
 
         btn = Button("restart", pygame.Rect(SCREEN_W - 150, 14, 130, 36),
                      "重新开始", self.font(18, True))
@@ -369,6 +530,15 @@ class App:
             center = (ox + a["c"] * cell + cell // 2, oy + a["r"] * cell + cell // 2)
             draw_arrow(surface, center, cell // 2, a["d"], DIR_COLORS[a["d"]], off)
 
+        # 提示高亮：金色闪烁边框
+        if self.hint_cell is not None:
+            hr, hc = self.hint_cell
+            if grid[hr][hc] in DIRECTIONS and (hr, hc) not in flying and (hr, hc) not in shaking:
+                pulse = 0.5 + 0.5 * math.sin(now * 0.006)
+                rect = pygame.Rect(ox + hc * cell, oy + hr * cell, cell, cell)
+                pygame.draw.rect(surface, COLOR_GOLD, rect,
+                                 width=int(2 + 3 * pulse), border_radius=8)
+
         # 浮动提示
         for p in self.popups:
             age = now - p["t0"]
@@ -378,40 +548,65 @@ class App:
             rect = img.get_rect(center=(p["x"], p["y"] - age * 0.03))
             surface.blit(img, rect)
 
+        # ---- 底部功能按钮：撤销 / 提示 / AI求解 ----
+        cx = SCREEN_W // 2
+        btn_y = oy + rows * cell + 12
+        bw, bh = 110, 40
+        solving = self.solving
+        undo_left = game.current.undo_left
+        btn = Button("undo", pygame.Rect(cx - 177, btn_y, bw, bh),
+                     "撤销 %d/%d" % (undo_left, game.current.max_undo),
+                     self.font(18, True), enabled=undo_left > 0 and not solving)
+        btn.draw(surface, self.mouse_pos)
+        self.buttons["undo"] = btn
+
+        hint_left = game.current.hint_left
+        btn = Button("hint", pygame.Rect(cx - 55, btn_y, bw, bh),
+                     "提示 %d/%d" % (hint_left, game.current.max_hint),
+                     self.font(18, True), enabled=hint_left > 0 and not solving)
+        btn.draw(surface, self.mouse_pos)
+        self.buttons["hint"] = btn
+
+        btn = Button("solve", pygame.Rect(cx + 67, btn_y, bw, bh), "AI求解",
+                     self.font(18, True), enabled=not solving)
+        btn.draw(surface, self.mouse_pos)
+        self.buttons["solve"] = btn
+
         # ---- 通关 / 失败 / 全部通关 遮罩 ----
-        if game.state == Game.LEVEL_CLEAR:
+        # 通关/全部通关时等最后一个箭头完全飞出棋盘后再弹出结果面板
+        if game.state == Game.LEVEL_CLEAR and not self.fly_anims:
             lv = game.current
             used_sec = math.ceil(lv.elapsed)
-            used_mist = lv.max_mistakes - lv.mistakes
+            used_lives = lv.max_mistakes - lv.mistakes
+            # 最后一关先显示本关通关界面，点“查看总星数”再进入全部通关界面
+            btn_text = "查看总星数" if game.is_last_level() else "下一关"
             self._render_overlay(surface, "第 %d 关通关！" % game.level_no,
-                                 "用时 %d 秒 · 失误 %d 次" % (used_sec, used_mist),
-                                 [("next", "下一关")], stars=lv.stars())
+                                 "用时 %d 秒 · 消耗生命 %d 点" % (used_sec, used_lives),
+                                 [("next", btn_text)], stars=lv.stars())
         elif game.state == Game.FAILED:
             if game.fail_reason == "timeout":
                 title, subtitle = "时间到！", "限时耗尽，本关失败，再试一次吧"
             else:
-                title, subtitle = "失误次数耗尽", "本关失败，再试一次吧"
+                title, subtitle = "生命值耗尽", "本关失败，再试一次吧"
             self._render_overlay(surface, title, subtitle,
                                  [("retry", "重新开始")])
-        elif game.state == Game.ALL_CLEAR:
+        elif game.state == Game.ALL_CLEAR and not self.fly_anims:
             self._render_overlay(surface, "恭喜通关全部关卡！",
                                  "共获得 %d / %d 颗星" % (
-                                     game.total_stars(), game.total_levels * 3),
+                                     game.total_stars(), game.total_levels * 5),
                                  [("home", "返回首页")])
 
-    def _draw_mistakes(self, surface, x, cy, level):
-        """绘制剩余失误次数：红色实心表示剩余，灰色空心表示已消耗。"""
-        draw_text(surface, "失误：", self.font(22), COLOR_TEXT, (x, cy))
+    def _draw_lives(self, surface, x, cy, level):
+        """绘制剩余生命值：红色实心表示剩余生命，灰色空心表示已消耗，不显示数量文字。"""
+        draw_text(surface, "生命值", self.font(22), COLOR_TEXT, (x, cy))
         step = 26
-        start = x + 52
+        start = x + 55
         for i in range(level.max_mistakes):
             cx = start + i * step
             remaining = i < level.mistakes
             color = COLOR_DANGER if remaining else (200, 208, 218)
             pygame.draw.circle(surface, color, (cx, cy), 9)
             pygame.draw.circle(surface, (255, 255, 255), (cx - 3, cy - 3), 3)
-        draw_text(surface, str(level.mistakes), self.font(20, True), COLOR_TEXT,
-                  (start + level.max_mistakes * step + 12, cy))
 
     def _render_overlay(self, surface, title, subtitle, buttons, stars=None):
         """绘制半透明遮罩 + 结果面板 +（可选）星级 + 按钮。"""
@@ -426,16 +621,18 @@ class App:
         pygame.draw.rect(surface, COLOR_BOARD_BD, panel, width=2, border_radius=18)
 
         ty = panel.centery - 85
-        draw_text(surface, title, self.font(36, True), COLOR_TEXT, (SCREEN_W // 2, ty))
+        # 标题启用“视觉居中”修正：全角感叹号等标点的边界框留白会使标题偏左
+        draw_text(surface, title, self.font(36, True), COLOR_TEXT,
+                  (SCREEN_W // 2, ty), visual_center=True)
 
         if stars is not None:
-            # 星级：金色实心 = 已获得，灰色 = 未获得，并配文字说明
+            # 星级：金色实心 = 已获得，灰色 = 未获得（5 星制），并配文字说明
             gold, gray = (243, 156, 18), (205, 216, 228)
-            start_x = SCREEN_W // 2 - 2 * 44
-            for i in range(3):
+            start_x = SCREEN_W // 2 - 2 * 44          # 5 颗星整体居中（中间那颗对准屏幕中心）
+            for i in range(5):
                 draw_star(surface, (start_x + i * 44, ty + 56), 24,
                           gold if i < stars else gray)
-            draw_text(surface, "%d / 3 星" % stars, self.font(18, True), COLOR_SUB,
+            draw_text(surface, "%d / 5 星" % stars, self.font(18, True), COLOR_SUB,
                       (SCREEN_W // 2, ty + 104))
             sy = ty + 148
         else:
@@ -445,7 +642,7 @@ class App:
 
         bw, bh = 180, 50
         bx = panel.centerx - bw // 2
-        by = panel.centery + (120 if stars is not None else 42)
+        by = panel.centery + (85 if stars is not None else 42)   # 按钮留出底部边距，避免贴住面板底边
         for name, text in buttons:
             btn = Button(name, pygame.Rect(bx, by, bw, bh), text, self.font(22, True))
             btn.draw(surface, self.mouse_pos)
@@ -462,9 +659,11 @@ def main():
 
     if args.smoke > 0:
         os.environ["SDL_VIDEODRIVER"] = "dummy"
+        os.environ["SDL_AUDIODRIVER"] = "dummy"   # 冒烟测试不初始化真实音频
 
+    pygame.mixer.pre_init(44100, -16, 1, 512)     # 单声道 16bit，匹配程序生成的音效
     pygame.init()
-    pygame.display.set_caption("一箭又一箭 - 软件工程第二次作业")
+    pygame.display.set_caption("一箭又一箭")
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
     clock = pygame.time.Clock()
 
