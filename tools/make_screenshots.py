@@ -58,14 +58,14 @@ def main():
 
     # 1) 开始界面
     app.render(screen, now)
-    save(screen, "start.png")
+    save(screen, "01_start.png")
 
     # 2) 进入游戏，显示第 1 关
     app.start_game()
     app.render(screen, now)
-    save(screen, "game_level1.png")
+    save(screen, "02_game_level1.png")
 
-    # 3) 碰撞反馈：点击第 1 关中“被阻挡”的箭头 -> 晃动 + 提示 + 失误 -1
+    # 3) 碰撞反馈：点击第 1 关中“被阻挡”的箭头 -> 晃动 + 提示 + 生命 -1
     blocked = find_cells(app, want_free=False)
     assert blocked, "第 1 关没有被阻挡的箭头"
     _, _, bx, by = blocked[0]
@@ -75,7 +75,7 @@ def main():
     if app.popups:
         app.popups[0]["t0"] -= 160
     app.render(screen, pygame.time.get_ticks())
-    save(screen, "collision.png")
+    save(screen, "05_collision.png")
 
     # 4) 飞出动画：点击“无阻挡”的箭头，让箭头处于飞行中间帧
     free = find_cells(app, want_free=True)
@@ -90,7 +90,7 @@ def main():
     app.render(screen, pygame.time.get_ticks())
     save(screen, "fly_animation.png")
 
-    # 5) 通关界面：用求解器顺序清空第 1 关（未消耗时间，显示 3 星）
+    # 5) 通关界面：用求解器顺序清空第 1 关（未消耗时间，显示 5 星）
     app.game.restart_level()
     app.popups.clear()
     app.shake_anims.clear()
@@ -99,7 +99,7 @@ def main():
     for r, c in order:
         app.game.click(r, c)
     app.render(screen, pygame.time.get_ticks())
-    save(screen, "level_clear.png")
+    save(screen, "06_level_clear.png")
 
     # 6) 失败界面：构造失误耗尽的第 2 关
     app.start_game()
@@ -109,7 +109,7 @@ def main():
     app.game.state = Game.FAILED
     app.game.fail_reason = "mistakes"
     app.render(screen, pygame.time.get_ticks())
-    save(screen, "failed.png")
+    save(screen, "07_failed.png")
 
     # 6b) 超时失败界面：时间耗尽
     app.start_game()
@@ -117,18 +117,18 @@ def main():
     app.game.tick(1.0)                     # 时间耗尽 -> FAILED(timeout)
     assert app.game.state == Game.FAILED and app.game.fail_reason == "timeout"
     app.render(screen, pygame.time.get_ticks())
-    save(screen, "timeout.png")
+    save(screen, "08_timeout.png")
 
     # 7) 全部通关界面：构造全部关卡已清空，显示总星数
     app.start_game()
     for lv in app.game.levels:
         lv.grid = [["." for _ in range(lv.cols)] for _ in range(lv.rows)]  # 已清空
-        lv.remaining = lv.time_limit * 0.5              # 用时 50%，全部 3 星 -> 15/15
+        lv.remaining = lv.time_limit * 0.5              # 用时 50%，全部 5 星 -> 25/25
     app.game.level_index = app.game.total_levels - 1
     app.game.current = app.game.levels[app.game.level_index]
     app.game.state = Game.ALL_CLEAR
     app.render(screen, pygame.time.get_ticks())
-    save(screen, "all_clear.png")
+    save(screen, "09_all_clear.png")
 
     # 8) 第 5 关游戏界面（8x8 高密度棋盘）
     app.start_game()
@@ -136,16 +136,17 @@ def main():
     app.game.current = app.game.levels[app.game.level_index]
     app.game.state = Game.PLAYING
     app.render(screen, pygame.time.get_ticks())
-    save(screen, "game_level5.png")
+    save(screen, "04_game_level5.png")
 
-    # 9) 第 2~4 关游戏界面（随机布局检查）
+    # 9) 第 2~4 关游戏界面（随机布局检查；第 2 关按博客顺序编号）
     for idx in (1, 2, 3):
         app.start_game()                      # 重新生成关卡，确保失误次数为初始值
         app.game.level_index = idx
         app.game.current = app.game.levels[idx]
         app.game.state = Game.PLAYING
         app.render(screen, pygame.time.get_ticks())
-        save(screen, "game_level%d.png" % (idx + 1))
+        name = "03_game_level2.png" if idx == 1 else "game_level%d.png" % (idx + 1)
+        save(screen, name)
 
     pygame.quit()
     print("ALL_SCREENSHOTS_OK")

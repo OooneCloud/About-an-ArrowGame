@@ -22,7 +22,7 @@ import main as app_module
 
 SCREEN_W, SCREEN_H = app_module.SCREEN_W, app_module.SCREEN_H
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                   "screenshots", "demo.gif")
+                   "screenshots", "10_demo.gif")
 
 FPS = 60
 GIF_EVERY = 4          # 每 4 帧取一帧 -> 15 fps
