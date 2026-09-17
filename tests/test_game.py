@@ -10,13 +10,29 @@ tests/test_game.py —— “一箭又一箭”自动化测试
   T05 失误次数耗尽                -> 显示失败并允许重新开始
   T06 游戏进行中重新开始           -> 箭头布局和失误次数恢复
 
-评分机制测试项（后续追加）：
+评分机制测试项（后续追加，5 星制）：
   T07 限时耗尽                   -> 超时失败
-  T08 无失误且快速通关            -> 3 星
-  T09 用时较长或失误 1 次         -> 2 星
-  T10 用时超 85% 或失误 ≥2 次     -> 1 星
+  T08 快速（用时 ≤50%）无消耗不用撤销/提示 -> 5 星
+  T09 用时 ≤75% 或生命消耗 1 点   -> 4 星
+  T10 用时超 75% 或生命消耗 ≥2 点 -> 3 星
   T11 重新开始                   -> 剩余时间恢复
   T12 通关后                     -> 时间停止倒计时
+
+撤销 / 提示 / AI 求解测试项（后续追加）：
+  T13 撤销消除步骤               -> 箭头恢复到原位
+  T14 撤销失误步骤               -> 生命值 +1
+  T15 无历史时撤销               -> 返回 (None, None)
+  T16 连续撤销                   -> 棋盘恢复初始布局
+  T17 通关后撤销                 -> 无效
+  T18 生命耗尽失败后撤销         -> 恢复游戏中状态
+  T19 提示                       -> 返回一个前方无阻挡的箭头
+  T20 空棋盘提示                 -> 返回 None
+  T21 撤销次数用尽               -> 不再允许撤销，次数不恢复
+  T22 使用 AI 求解               -> 通关评分直接 1 星
+  T23 使用撤销 1 次              -> 星级最高 4 星
+  T24 提示次数用尽               -> 不再允许提示，重新开始后恢复
+  T25 使用提示 1 次              -> 星级最高 4 星
+  T26 使用撤销 ≥2 次             -> 星级最高 3 星
 
 另外补充：四方向路径检测的单元测试、关卡可解性校验、关卡方向齐全性校验。
 测试中“无阻挡/有阻挡箭头”均从关卡数据中自动推导，关卡调整后无需修改测试。
@@ -165,12 +181,14 @@ class TestHomeworkCases(unittest.TestCase):
         self.assertEqual(game.current.remaining_arrows(), arrow_count(LEVELS[1]))
 
     def test_t04_last_level_all_clear(self):
-        """最后一关清空 -> 显示“全部通关”。"""
+        """最后一关清空 -> 先显示本关通关界面，点“下一关”后显示全部通关。"""
         game = Game([Level(LEVELS[-1])])
         order = solve_order(LEVELS[-1])
         self.assertIsNotNone(order)
         for r, c in order:
             game.click(r, c)
+        self.assertEqual(game.state, Game.LEVEL_CLEAR)   # 先显示本关通关界面
+        game.next_level()                                # 再进入全部通关
         self.assertEqual(game.state, Game.ALL_CLEAR)
 
     def test_t05_mistakes_exhausted_fail_and_retry(self):
@@ -232,46 +250,46 @@ class TestScoring(unittest.TestCase):
         self.assertEqual(game.state, Game.PLAYING)
         self.assertAlmostEqual(game.current.remaining, 7.0)
 
-    def test_t08_three_stars_fast_no_mistake(self):
-        """T08：无失误且用时 ≤ 60% 限时 -> 3 星。"""
+    def test_t08_five_stars_fast_no_cost(self):
+        """T08：用时 ≤ 50%、无生命消耗、不用撤销和提示 -> 5 星。"""
         level = Level(LEVELS[0], time_limit=100)
-        level.remaining = 40.0                      # 已用 60 秒 = 60%
+        level.remaining = 50.0                      # 已用 50 秒 = 50%
         for r, c in solve_order(LEVELS[0]):
             result, _ = level.click(r, c)
             self.assertEqual(result, "fly")
-        self.assertEqual(level.stars(), 3)
+        self.assertEqual(level.stars(), 5)
 
-    def test_t09_two_stars(self):
-        """T09：用时 70% 无失误 -> 2 星；快通但失误 1 次 -> 2 星。"""
-        # 用时 70%（无失误）
+    def test_t09_four_stars(self):
+        """T09：用时 70%（≤75%）或生命消耗 1 点 -> 4 星。"""
+        # 用时 70%（无消耗、不用撤销和提示）
         level = Level(LEVELS[0], time_limit=100)
         level.remaining = 30.0
         for r, c in solve_order(LEVELS[0]):
             level.click(r, c)
-        self.assertEqual(level.stars(), 2)
-        # 快通但有 1 次失误
+        self.assertEqual(level.stars(), 4)
+        # 快通但有 1 次生命消耗
         level2 = Level(LEVELS[0], time_limit=100)
         level2.remaining = 50.0
         level2.mistakes = level2.max_mistakes - 1
         for r, c in solve_order(LEVELS[0]):
             level2.click(r, c)
-        self.assertEqual(level2.stars(), 2)
+        self.assertEqual(level2.stars(), 4)
 
-    def test_t10_one_star(self):
-        """T10：用时超过 85% 或失误 ≥2 次 -> 1 星。"""
-        # 用时 90%（无失误）
+    def test_t10_three_stars(self):
+        """T10：用时超过 75% 或生命消耗 ≥2 点 -> 3 星。"""
+        # 用时 90%（无消耗）
         level = Level(LEVELS[0], time_limit=100)
         level.remaining = 10.0
         for r, c in solve_order(LEVELS[0]):
             level.click(r, c)
-        self.assertEqual(level.stars(), 1)
-        # 失误 2 次（快通）
+        self.assertEqual(level.stars(), 3)
+        # 生命消耗 2 点（快通）
         level2 = Level(LEVELS[0], time_limit=100)
         level2.remaining = 50.0
         level2.mistakes = 0
         for r, c in solve_order(LEVELS[0]):
             level2.click(r, c)
-        self.assertEqual(level2.stars(), 1)
+        self.assertEqual(level2.stars(), 3)
 
     def test_t10_not_cleared_zero_star(self):
         """未通关时星级为 0（不计入总分）。"""
@@ -296,6 +314,169 @@ class TestScoring(unittest.TestCase):
         game.tick(30.0)
         self.assertEqual(game.current.remaining, before)
         self.assertGreaterEqual(game.current.stars(), 1)
+
+
+# ---------------------------------------------------------------- 撤销 / 提示
+class TestUndoHint(unittest.TestCase):
+    """撤销上一步与提示功能（T13 - T20）。"""
+
+    def test_t13_undo_fly_restores_arrow(self):
+        """T13：撤销消除步骤 -> 箭头恢复到原位。"""
+        level = Level(LEVELS[0])
+        r, c = find_free_arrow(LEVELS[0])
+        level.click(r, c)
+        self.assertEqual(level.grid[r][c], EMPTY)
+        result, pos = level.undo()
+        self.assertEqual(result, "fly")
+        self.assertEqual(pos, (r, c))
+        self.assertEqual(level.grid[r][c], LEVELS[0][r][c])
+        self.assertEqual(level.remaining_arrows(), arrow_count(LEVELS[0]))
+
+    def test_t14_undo_blocked_restores_life(self):
+        """T14：撤销失误步骤 -> 生命值 +1。"""
+        level = Level(LEVELS[0])
+        r, c = find_blocked_arrow(LEVELS[0])
+        level.click(r, c)
+        self.assertEqual(level.mistakes, level.max_mistakes - 1)
+        result, _ = level.undo()
+        self.assertEqual(result, "blocked")
+        self.assertEqual(level.mistakes, level.max_mistakes)
+
+    def test_t15_undo_empty_history(self):
+        """T15：没有历史操作时撤销 -> (None, None)。"""
+        level = Level(LEVELS[0])
+        self.assertEqual(level.undo(), (None, None))
+
+    def test_t16_undo_restores_initial_board(self):
+        """T16：连续撤销 -> 棋盘恢复初始布局。"""
+        level = Level(LEVELS[0])
+        for r, c in solve_order(LEVELS[0])[:3]:
+            level.click(r, c)
+        self.assertEqual(level.remaining_arrows(), arrow_count(LEVELS[0]) - 3)
+        for _ in range(3):
+            level.undo()
+        self.assertEqual(level.grid, [list(row) for row in LEVELS[0]])
+        self.assertEqual(level.remaining_arrows(), arrow_count(LEVELS[0]))
+
+    def test_t17_undo_disabled_after_clear(self):
+        """T17：通关后撤销无效。"""
+        game = Game([Level(LEVELS[0]), Level(LEVELS[1])])
+        for r, c in solve_order(LEVELS[0]):
+            game.click(r, c)
+        self.assertEqual(game.state, Game.LEVEL_CLEAR)
+        self.assertEqual(game.undo(), (None, None))
+
+    def test_t18_undo_revives_from_failure(self):
+        """T18：生命耗尽失败后撤销 -> 恢复生命并回到游戏中。"""
+        game = Game([Level(LEVELS[0])])
+        r, c = find_blocked_arrow(LEVELS[0])
+        for _ in range(game.current.max_mistakes):
+            game.click(r, c)
+        self.assertEqual(game.state, Game.FAILED)
+        result, _ = game.undo()
+        self.assertEqual(result, "blocked")
+        self.assertEqual(game.state, Game.PLAYING)
+        self.assertEqual(game.fail_reason, None)
+        self.assertEqual(game.current.mistakes, 1)
+
+    def test_t18_undo_disabled_after_timeout(self):
+        """超时失败不可撤销（时间不可逆）。"""
+        game = Game([Level(LEVELS[0], time_limit=5)])
+        game.tick(6.0)
+        self.assertEqual(game.state, Game.FAILED)
+        self.assertEqual(game.fail_reason, "timeout")
+        self.assertEqual(game.undo(), (None, None))
+
+    def test_t19_hint_returns_unblocked_arrow(self):
+        """T19：提示返回一个前方无阻挡的箭头。"""
+        level = Level(LEVELS[0])
+        r, c = level.hint()
+        self.assertIsNotNone((r, c))
+        self.assertIn(level.grid[r][c], DIRECTIONS)
+        self.assertFalse(level.is_blocked(r, c))
+
+    def test_t20_hint_none_on_empty_board(self):
+        """T20：棋盘为空时提示返回 None。"""
+        level = Level([["."]])
+        self.assertIsNone(level.hint())
+
+    def test_t21_undo_limit_exhausted(self):
+        """T21：撤销次数用尽后不再允许撤销。"""
+        level = Level(LEVELS[0])                       # 默认最多撤销 3 次
+        order = solve_order(LEVELS[0])[:level.max_undo]
+        self.assertEqual(len(order), level.max_undo)
+        for r, c in order:
+            level.click(r, c)
+        # 撤销到次数用尽
+        for _ in range(level.max_undo):
+            result, _ = level.undo()
+            self.assertIsNotNone(result)
+        self.assertEqual(level.undo_left, 0)
+        self.assertEqual(level.undo(), (None, None))   # 次数用尽，撤销无效
+        self.assertEqual(level.remaining_arrows(), arrow_count(LEVELS[0]))  # 已全部还原
+
+    def test_t21_undo_left_resets(self):
+        """重新开始时撤销次数恢复为上限。"""
+        game = Game([Level(LEVELS[0])])
+        r, c = find_free_arrow(LEVELS[0])
+        game.click(r, c)
+        game.undo()
+        self.assertEqual(game.current.undo_left, game.current.max_undo - 1)
+        game.restart_level()
+        self.assertEqual(game.current.undo_left, game.current.max_undo)
+
+    def test_t22_ai_solve_one_star(self):
+        """T22：使用 AI 求解 -> 通关评分直接 1 星。"""
+        game = Game([Level(LEVELS[0]), Level(LEVELS[1])])
+        game.use_ai_solve()
+        for r, c in solve_order(LEVELS[0]):
+            game.click(r, c)
+        self.assertEqual(game.state, Game.LEVEL_CLEAR)
+        self.assertEqual(game.current.stars(), 1)
+
+    def test_t23_undo_lowers_stars(self):
+        """T23：使用撤销后星级最高 4 星。"""
+        level = Level(LEVELS[0], time_limit=100)
+        level.remaining = 50.0                       # 用时 50%，时间分 0
+        r, c = find_free_arrow(LEVELS[0])
+        level.click(r, c)
+        level.undo()                                 # 撤销 1 次
+        for rr, cc in solve_order(LEVELS[0]):
+            if level.grid[rr][cc] in DIRECTIONS:
+                level.click(rr, cc)
+        self.assertEqual(level.stars(), 4)           # 5 - 撤销分 1
+
+    def test_t24_hint_limit(self):
+        """T24：提示次数用尽后不再允许提示，重新开始后恢复。"""
+        game = Game([Level(LEVELS[0])])
+        for _ in range(game.current.max_hint):
+            self.assertGreaterEqual(game.current.use_hint(), 0)
+        self.assertEqual(game.current.hint_left, 0)
+        self.assertEqual(game.current.use_hint(), -1)   # 用尽
+        game.restart_level()
+        self.assertEqual(game.current.hint_left, game.current.max_hint)
+
+    def test_t25_hint_lowers_stars(self):
+        """T25：使用提示扣 1 分 -> 快通 + 零消耗 + 提示 1 次 = 4 星。"""
+        level = Level(LEVELS[0], time_limit=100)
+        level.remaining = 50.0
+        level.use_hint()
+        for r, c in solve_order(LEVELS[0]):
+            level.click(r, c)
+        self.assertEqual(level.stars(), 4)
+
+    def test_t26_undo_twice_three_stars(self):
+        """T26：撤销 2 次 -> 撤销分 2，快通 + 零消耗 = 3 星。"""
+        level = Level(LEVELS[0], time_limit=100)
+        level.remaining = 50.0
+        for r, c in solve_order(LEVELS[0])[:2]:
+            level.click(r, c)
+        level.undo()
+        level.undo()
+        for rr, cc in solve_order(LEVELS[0]):
+            if level.grid[rr][cc] in DIRECTIONS:
+                level.click(rr, cc)
+        self.assertEqual(level.stars(), 3)
 
 
 # ---------------------------------------------------------------- 关卡质量
