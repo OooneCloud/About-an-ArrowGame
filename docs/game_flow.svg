@@ -16,17 +16,17 @@
   <!-- N2 游戏界面 -->
   <rect x="380" y="48" width="220" height="64" rx="12" fill="#EAF2FF" stroke="#4285F4" stroke-width="2"/>
   <text x="490" y="76" font-size="17" font-weight="bold" fill="#1A3C8F" text-anchor="middle">游戏界面</text>
-  <text x="490" y="97" font-size="12" fill="#5A6B7C" text-anchor="middle">HUD：关卡 / 剩余箭头 / 失误 / 时间</text>
+  <text x="490" y="97" font-size="12" fill="#5A6B7C" text-anchor="middle">HUD：关卡 / 生命 / 时间</text>
 
   <!-- N3 碰撞反馈 -->
   <rect x="90" y="250" width="230" height="64" rx="12" fill="#FDECEA" stroke="#E74C3C" stroke-width="2"/>
-  <text x="205" y="278" font-size="16" font-weight="bold" fill="#B03A2E" text-anchor="middle">碰撞反馈 · 失误 -1</text>
+  <text x="205" y="278" font-size="16" font-weight="bold" fill="#B03A2E" text-anchor="middle">碰撞反馈 · 生命 -1</text>
   <text x="205" y="299" font-size="12" fill="#7A4A44" text-anchor="middle">箭头晃动 + 红色提示文字</text>
 
   <!-- N4 失败界面 -->
   <rect x="90" y="440" width="230" height="64" rx="12" fill="#FDECEA" stroke="#E74C3C" stroke-width="2"/>
   <text x="205" y="468" font-size="16" font-weight="bold" fill="#B03A2E" text-anchor="middle">失败界面</text>
-  <text x="205" y="489" font-size="12" fill="#7A4A44" text-anchor="middle">失误耗尽 / 限时耗尽</text>
+  <text x="205" y="489" font-size="12" fill="#7A4A44" text-anchor="middle">生命耗尽 / 限时耗尽</text>
 
   <!-- N5 箭头飞出 -->
   <rect x="420" y="250" width="230" height="64" rx="12" fill="#EAF9F0" stroke="#2ECC71" stroke-width="2"/>
@@ -62,7 +62,7 @@
 
   <!-- N3 -> N4 -->
   <line x1="205" y1="314" x2="205" y2="440" stroke="#E74C3C" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="220" y="380" font-size="13" fill="#B03A2E">失误次数耗尽</text>
+  <text x="220" y="380" font-size="13" fill="#B03A2E">生命值耗尽</text>
 
   <!-- N4 -> N2 重新开始（虚线） -->
   <path d="M 320 472 L 370 472 L 370 200 L 470 200 L 470 112" fill="none" stroke="#8A97A5" stroke-width="2" stroke-dasharray="6,5" marker-end="url(#arrow)"/>
@@ -85,5 +85,5 @@
   <text x="330" y="550" font-size="13" fill="#5A6B7C" text-anchor="middle">点击「返回首页」</text>
 
   <!-- 补充说明 -->
-  <text x="490" y="610" font-size="13" fill="#8A97A5" text-anchor="middle">界面右上角「重新开始」按钮可随时重置当前关卡；通关后按用时与失误评定 1~3 颗星；所有关卡均已通过可解性求解器校验。</text>
+  <text x="490" y="610" font-size="13" fill="#8A97A5" text-anchor="middle">界面右上角「重新开始」按钮可随时重置当前关卡；棋盘下方有撤销/提示/AI求解功能；通关后等最后一个箭头飞出棋盘再显示结果，并按用时、生命消耗、撤销与提示次数评定 1~5 颗星（使用 AI 求解直接 1 星）；所有关卡均已通过可解性求解器校验。</text>
 </svg>
