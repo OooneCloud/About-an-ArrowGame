@@ -14,6 +14,7 @@ game.py —— “一箭又一箭”核心游戏逻辑
 """
 
 from copy import deepcopy
+import random
 
 # 方向字符 -> (行方向偏移, 列方向偏移)
 # 行坐标向下增加，列坐标向右增加
@@ -80,6 +81,206 @@ def solve_order(grid):
         r, c = candidates[0]
         g[r][c] = EMPTY
         order.append((r, c))
+
+
+# ---------------------------------------------------------------- 关卡生成（挑战关卡用）
+def _path_has_arrow(board, r, c, d):
+    """(r, c) 处沿方向 d 到棋盘边界是否已有箭头。"""
+    dr, dc = DIRECTIONS[d]
+    rr, cc = r + dr, c + dc
+    while 0 <= rr < len(board) and 0 <= cc < len(board[0]):
+        if board[rr][cc] in DIRECTIONS:
+            return True
+        rr += dr
+        cc += dc
+    return False
+
+
+def _max_same_run(board):
+    """同行/同列中连续同方向箭头的最大长度（衡量“一整排同向”的程度）。"""
+    rows, cols = len(board), len(board[0])
+    best = 1
+    for r in range(rows):
+        run = 1
+        for c in range(1, cols):
+            a, b = board[r][c - 1], board[r][c]
+            run = run + 1 if (a in DIRECTIONS and a == b) else 1
+            best = max(best, run)
+    for c in range(cols):
+        run = 1
+        for r in range(1, rows):
+            a, b = board[r - 1][c], board[r][c]
+            run = run + 1 if (a in DIRECTIONS and a == b) else 1
+            best = max(best, run)
+    return best
+
+
+def _max_block_same(board, block=2):
+    """任意 block×block 子块内同一方向箭头数的最大值（衡量“同向箭头扎堆”的程度）。"""
+    rows, cols = len(board), len(board[0])
+    best = 0
+    for r in range(rows - block + 1):
+        for c in range(cols - block + 1):
+            counts = {}
+            for rr in range(r, r + block):
+                for cc in range(c, c + block):
+                    ch = board[rr][cc]
+                    if ch in DIRECTIONS:
+                        counts[ch] = counts.get(ch, 0) + 1
+            best = max(best, max(counts.values(), default=0))
+    return best
+
+
+def _direction_range(board):
+    """四种方向箭头数量的极差（最多 - 最少），衡量方向分布是否均衡。"""
+    counts = {d: 0 for d in DIRECTIONS}
+    for row in board:
+        for ch in row:
+            if ch in DIRECTIONS:
+                counts[ch] += 1
+    vals = list(counts.values())
+    return max(vals) - min(vals)
+
+
+def _quadrant_kinds_ok(board, min_kinds=3, min_arrows=4):
+    """
+    方向分散性检查：把棋盘按行列中点分为四个象限，
+    箭头数不少于 min_arrows 的象限，其方向种类不得少于 min_kinds，
+    避免“大范围区域里只有两种箭头”的聚集现象。
+    """
+    rows, cols = len(board), len(board[0])
+    mid_r, mid_c = rows // 2, cols // 2
+    quads = [
+        (0, mid_r, 0, mid_c), (0, mid_r, mid_c, cols),
+        (mid_r, rows, 0, mid_c), (mid_r, rows, mid_c, cols),
+    ]
+    for r0, r1, c0, c1 in quads:
+        kinds = set()
+        n = 0
+        for r in range(r0, r1):
+            for c in range(c0, c1):
+                ch = board[r][c]
+                if ch in DIRECTIONS:
+                    kinds.add(ch)
+                    n += 1
+        if n >= min_arrows and len(kinds) < min_kinds:
+            return False
+    return True
+
+
+def _greedy_rounds(board):
+    """贪心模拟消除所需轮数（依赖深度）与是否全部消除。"""
+    g = [list(row) for row in board]
+    rounds = 0
+    while True:
+        free = [(r, c) for r in range(len(g)) for c in range(len(g[0]))
+                if g[r][c] in DIRECTIONS and not _blocked(g, r, c)]
+        if not free:
+            remain = sum(1 for row in g for ch in row if ch in DIRECTIONS)
+            return rounds, remain
+        rounds += 1
+        for r, c in free:
+            g[r][c] = EMPTY
+
+
+def generate_level(rows, cols, n_arrows, max_run=2, max_block=3,
+                   min_blocked_ratio=0.3, min_rounds=3, max_range=5,
+                   seed=None, tries=2000, step_tries=150):
+    """
+    用“增量构造法”随机生成一个可通关关卡，并满足方向乱序性与分布均衡质量要求：
+
+      逐个放置箭头；每个新箭头放置时，要求其前进方向上没有任何已放置的箭头。
+      这样按“放置顺序的逆序”消除时，每个箭头前方必然无阻挡，关卡必然可通关
+      （再经 solve_order 双保险校验）。
+
+      质量过滤：
+        - 四种方向齐全；
+        - 方向数量均衡：四种方向箭头数的极差不超过 max_range（默认 5）；
+        - 方向分散：箭头数较多的象限内方向种类不少于 3 种（避免大区域只有两种箭头）；
+        - 同行/同列连续同向不超过 max_run、任意 2×2 子块内同方向不超过 max_block；
+        - 有足够多的初始阻挡箭头、具备一定的依赖深度。
+
+    成功返回 (board, rounds, blocked)；失败返回 None。
+    """
+    rng = random.Random(seed)
+    dirs = list(DIRECTIONS)
+    for _ in range(tries):
+        board = [[EMPTY] * cols for _ in range(rows)]
+        counts = {d: 0 for d in DIRECTIONS}
+        ok = True
+        for _step in range(n_arrows):
+            added = False
+            for _try in range(step_tries):
+                r = rng.randrange(rows)
+                c = rng.randrange(cols)
+                if board[r][c] in DIRECTIONS:
+                    continue
+                cand = [d for d in dirs if not _path_has_arrow(board, r, c, d)]
+                if not cand:
+                    continue
+                # 方向均衡：当前数量越少的方向，被选中的权重越大
+                weights = [1.0 / (counts[d] + 1) for d in cand]
+                d = rng.choices(cand, weights=weights, k=1)[0]
+                board[r][c] = d
+                counts[d] += 1
+                added = True
+                break
+            if not added:
+                ok = False
+                break
+        if not ok:
+            continue
+        if solve_order(board) is None:                   # 双保险：可解性校验
+            continue
+        dirs_set = {ch for row in board for ch in row if ch in DIRECTIONS}
+        if dirs_set != set("^v<>"):
+            continue
+        if _direction_range(board) > max_range:          # 方向数量均衡
+            continue
+        if not _quadrant_kinds_ok(board):                # 方向分散（避免大区域只有两种箭头）
+            continue
+        blocked = sum(1 for r in range(rows) for c in range(cols)
+                      if board[r][c] in DIRECTIONS and _blocked(board, r, c))
+        if blocked < min_blocked_ratio * n_arrows:       # 保证有碰撞玩法
+            continue
+        if _max_same_run(board) > max_run:               # 避免一整排同向
+            continue
+        if _max_block_same(board, 2) > max_block:        # 避免同向箭头扎堆（禁止 2×2 全同向）
+            continue
+        rounds, remain = _greedy_rounds(board)
+        if rounds < min_rounds or remain != 0:           # 保证一定依赖深度
+            continue
+        return board, rounds, blocked
+    return None
+
+
+def generate_challenge(seed=None):
+    """
+    生成“挑战关卡”棋盘：10×10、高密度。
+
+    在线生成要求快，因此采用预算式策略，按“乱序性要求”从严到宽依次尝试：
+      1. 60 个箭头 + 行/列连续同向 ≤ 2（严格乱序）；
+      2. 60 个箭头 + 行/列连续同向 ≤ 3；
+      3. 密度逐级下调（58 → 40），行/列连续同向 ≤ 3。
+    返回 (board, n_arrows)；全部失败返回 None。
+    """
+    rng = random.Random(seed)
+    attempts = [(60, 2, 250), (60, 3, 150), (60, 3, 150)]
+    for n, max_run, tries in attempts:
+        res = generate_level(10, 10, n, max_run=max_run, max_block=3,
+                             min_blocked_ratio=0.25, min_rounds=2,
+                             tries=tries, step_tries=120,
+                             seed=rng.randrange(10 ** 9))
+        if res is not None:
+            return res[0], n
+    for n in range(58, 39, -1):
+        res = generate_level(10, 10, n, max_run=3, max_block=3,
+                             min_blocked_ratio=0.2, min_rounds=2,
+                             tries=80, step_tries=120,
+                             seed=rng.randrange(10 ** 9))
+        if res is not None:
+            return res[0], n
+    return None
 
 
 class Level:
