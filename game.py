@@ -96,6 +96,19 @@ def _path_has_arrow(board, r, c, d):
     return False
 
 
+def _path_arrow_count(board, r, c, d):
+    """(r, c) 处沿方向 d 到棋盘边界路径上的箭头数量。"""
+    dr, dc = DIRECTIONS[d]
+    rr, cc = r + dr, c + dc
+    cnt = 0
+    while 0 <= rr < len(board) and 0 <= cc < len(board[0]):
+        if board[rr][cc] in DIRECTIONS:
+            cnt += 1
+        rr += dr
+        cc += dc
+    return cnt
+
+
 def _max_same_run(board):
     """同行/同列中连续同方向箭头的最大长度（衡量“一整排同向”的程度）。"""
     rows, cols = len(board), len(board[0])
@@ -142,11 +155,12 @@ def _direction_range(board):
     return max(vals) - min(vals)
 
 
-def _quadrant_kinds_ok(board, min_kinds=3, min_arrows=4):
+def _quadrant_kinds_ok(board, min_kinds=3, min_arrows=4, allow_missing=1):
     """
     方向分散性检查：把棋盘按行列中点分为四个象限，
-    箭头数不少于 min_arrows 的象限，其方向种类不得少于 min_kinds，
-    避免“大范围区域里只有两种箭头”的聚集现象。
+    箭头数不少于 min_arrows 的象限，其方向种类不得少于 min_kinds。
+    允许最多 allow_missing 个象限不满足（避免两个大范围象限都只有
+    两种箭头的聚集现象，同时不过度苛刻导致高密度关卡无法生成）。
     """
     rows, cols = len(board), len(board[0])
     mid_r, mid_c = rows // 2, cols // 2
@@ -154,6 +168,7 @@ def _quadrant_kinds_ok(board, min_kinds=3, min_arrows=4):
         (0, mid_r, 0, mid_c), (0, mid_r, mid_c, cols),
         (mid_r, rows, 0, mid_c), (mid_r, rows, mid_c, cols),
     ]
+    missing = 0
     for r0, r1, c0, c1 in quads:
         kinds = set()
         n = 0
@@ -164,8 +179,186 @@ def _quadrant_kinds_ok(board, min_kinds=3, min_arrows=4):
                     kinds.add(ch)
                     n += 1
         if n >= min_arrows and len(kinds) < min_kinds:
+            missing += 1
+            if missing > allow_missing:
+                return False
+    return True
+
+
+def _direction_centroid_ok(board, max_dev=None):
+    """
+    方向-位置分散检查：箭头不应聚在自己指向的那一侧。
+
+    增量构造法的“前进方向路径必须为空”约束会让箭头偏向自己指向的方向
+    （左箭头聚集在左侧、下箭头聚集在下部等）。本函数只惩罚这类方向性偏移：
+      - "<" 的平均列不应比棋盘中心列靠左太多；
+      - ">" 的平均列不应比棋盘中心列靠右太多；
+      - "^" 的平均行不应比棋盘中心行靠上太多；
+      - "v" 的平均行不应比棋盘中心行靠下太多。
+    反方向（如 "<" 偏右）属于自然随机波动，不惩罚。
+    """
+    rows, cols = len(board), len(board[0])
+    if max_dev is None:
+        # 阈值按棋盘规模设定：小棋盘箭头少、质心波动大
+        max_dev = max(2.4, 1.6 + 0.1 * min(rows, cols))
+    cy_r, cy_c = (rows - 1) / 2.0, (cols - 1) / 2.0
+    for d in DIRECTIONS:
+        pts = [(r, c) for r in range(rows) for c in range(cols) if board[r][c] == d]
+        if not pts:
+            continue
+        mr = sum(p[0] for p in pts) / len(pts)
+        mc = sum(p[1] for p in pts) / len(pts)
+        if d == "<":
+            dev = cy_c - mc          # 偏左多少
+        elif d == ">":
+            dev = mc - cy_c          # 偏右多少
+        elif d == "^":
+            dev = cy_r - mr          # 偏上多少
+        else:  # "v"
+            dev = mr - cy_r          # 偏下多少
+        if dev > max_dev:
             return False
     return True
+
+
+def _run_ok_at(grid, r, c, max_run=2):
+    """检查 (r, c) 所在行 / 列是否产生超过 max_run 的连续同向箭头（局部检查）。"""
+    rows, cols = len(grid), len(grid[0])
+    ch = grid[r][c]
+    run = 1
+    cc = c - 1
+    while cc >= 0 and grid[r][cc] == ch:
+        run += 1
+        cc -= 1
+    cc = c + 1
+    while cc < cols and grid[r][cc] == ch:
+        run += 1
+        cc += 1
+    if run > max_run:
+        return False
+    run = 1
+    rr = r - 1
+    while rr >= 0 and grid[rr][c] == ch:
+        run += 1
+        rr -= 1
+    rr = r + 1
+    while rr < rows and grid[rr][c] == ch:
+        run += 1
+        rr += 1
+    return run <= max_run
+
+
+def _run_ok_place(board, r, c, d, max_run=2):
+    """在 (r, c) 放置方向 d 后，该行 / 列连续同向箭头是否仍不超过 max_run。"""
+    board[r][c] = d
+    ok = _run_ok_at(board, r, c, max_run)
+    board[r][c] = EMPTY
+    return ok
+
+
+def _block2_ok_at(grid, r, c, max_same=3):
+    """检查包含 (r, c) 的 2×2 子块中同方向箭头数是否不超过 max_same（局部检查）。"""
+    rows, cols = len(grid), len(grid[0])
+    ch = grid[r][c]
+    for dr in (-1, 0):
+        for dc in (-1, 0):
+            r0, c0 = r + dr, c + dc
+            if 0 <= r0 < rows - 1 and 0 <= c0 < cols - 1:
+                sub = [grid[r0][c0], grid[r0][c0 + 1], grid[r0 + 1][c0], grid[r0 + 1][c0 + 1]]
+                if sum(1 for x in sub if x == ch) > max_same:
+                    return False
+    return True
+
+
+def _optimize_spread(board, max_dev=None, max_swaps=400, max_run=2):
+    """
+    局部搜索优化方向-位置分散：把“聚在自己指向方向”的箭头与反侧的
+    其他方向箭头交换位置，改善质心偏差；每次交换都校验可解性、
+    且不破坏行/列连续同向与 2×2 同向限制，否则回滚。
+    交换不改变各方向箭头数量。
+
+    返回优化后的棋盘（字符串行列表）。若已达标则原样返回。
+    """
+    rows, cols = len(board), len(board[0])
+    grid = [list(row) for row in board]
+    if max_dev is None:
+        max_dev = max(2.4, 1.6 + 0.1 * min(rows, cols))
+    cy_r, cy_c = (rows - 1) / 2.0, (cols - 1) / 2.0
+
+    def dev_of(d):
+        """返回 (方向偏差, 该方向箭头位置列表)"""
+        pts = [(r, c) for r in range(rows) for c in range(cols) if grid[r][c] == d]
+        if not pts:
+            return 0.0, pts
+        mr = sum(p[0] for p in pts) / len(pts)
+        mc = sum(p[1] for p in pts) / len(pts)
+        if d == "<":
+            dev = cy_c - mc
+        elif d == ">":
+            dev = mc - cy_c
+        elif d == "^":
+            dev = cy_r - mr
+        else:
+            dev = mr - cy_r
+        return dev, pts
+
+    for _ in range(max_swaps):
+        # 找出偏差最大的方向（需要改善的目标）
+        worst_d, worst_dev = None, 0.0
+        for d in DIRECTIONS:
+            dev, _ = dev_of(d)
+            if dev > worst_dev:
+                worst_d, worst_dev = d, dev
+        if worst_d is None or worst_dev <= max_dev:
+            break
+        _, pts = dev_of(worst_d)
+        if not pts:
+            break
+        # 选一个“最靠指向侧”的目标箭头
+        if worst_d == "<":
+            r1, c1 = min(pts, key=lambda p: p[1])
+        elif worst_d == ">":
+            r1, c1 = max(pts, key=lambda p: p[1])
+        elif worst_d == "^":
+            r1, c1 = min(pts, key=lambda p: p[0])
+        else:
+            r1, c1 = max(pts, key=lambda p: p[0])
+        # 候选交换对象：其他方向的箭头，越靠“反侧”越优先
+        others = [(r, c) for r in range(rows) for c in range(cols)
+                  if grid[r][c] in DIRECTIONS and grid[r][c] != worst_d]
+        if not others:
+            break
+        def opp_key(p):
+            if worst_d == "<":
+                return p[1]
+            if worst_d == ">":
+                return -p[1]
+            if worst_d == "^":
+                return p[0]
+            return -p[0]
+        others.sort(key=opp_key, reverse=True)
+        improved = False
+        for (r2, c2) in others[:12]:
+            d2 = grid[r2][c2]
+            grid[r1][c1], grid[r2][c2] = grid[r2][c2], grid[r1][c1]
+            ok_swap = (
+                solve_order(grid) is not None
+                and _run_ok_at(grid, r1, c1, max_run)
+                and _run_ok_at(grid, r2, c2, max_run)
+                and _block2_ok_at(grid, r1, c1)
+                and _block2_ok_at(grid, r2, c2)
+            )
+            if ok_swap:
+                new_dev, _ = dev_of(worst_d)
+                if new_dev < worst_dev - 0.05:
+                    improved = True
+                    break
+            # 回滚
+            grid[r1][c1], grid[r2][c2] = grid[r2][c2], grid[r1][c1]
+        if not improved:
+            # 该方向没有可改善的交换，标记为不再尝试（防死循环）
+            break
+    return [''.join(row) for row in grid]
 
 
 def _greedy_rounds(board):
@@ -185,18 +378,23 @@ def _greedy_rounds(board):
 
 def generate_level(rows, cols, n_arrows, max_run=2, max_block=3,
                    min_blocked_ratio=0.3, min_rounds=3, max_range=5,
-                   seed=None, tries=2000, step_tries=150):
+                   seed=None, tries=2000, step_tries=150, max_dev=None,
+                   max_path_arrows=0):
     """
     用“增量构造法”随机生成一个可通关关卡，并满足方向乱序性与分布均衡质量要求：
 
-      逐个放置箭头；每个新箭头放置时，要求其前进方向上没有任何已放置的箭头。
-      这样按“放置顺序的逆序”消除时，每个箭头前方必然无阻挡，关卡必然可通关
-      （再经 solve_order 双保险校验）。
+      逐个放置箭头；每个新箭头放置时，要求其前进方向上的箭头数不超过
+      max_path_arrows（默认 0，即路径全空：按“放置顺序的逆序”消除时每个
+      箭头前方必然无阻挡，构造上必然可通关）。稍放宽该值可大幅增加可行
+      位置、让方向分布更自由，最终由 solve_order 双保险校验可解性。
 
       质量过滤：
         - 四种方向齐全；
         - 方向数量均衡：四种方向箭头数的极差不超过 max_range（默认 5）；
         - 方向分散：箭头数较多的象限内方向种类不少于 3 种（避免大区域只有两种箭头）；
+        - 方向-位置分散：每个方向的箭头质心接近棋盘中心，避免
+          “左箭头全在左侧、下箭头全在下部”这类聚在自己指向方向的聚集
+          （放置时通过权重引导 + 生成后 _direction_centroid_ok 兜底校验）；
         - 同行/同列连续同向不超过 max_run、任意 2×2 子块内同方向不超过 max_block；
         - 有足够多的初始阻挡箭头、具备一定的依赖深度。
 
@@ -204,25 +402,56 @@ def generate_level(rows, cols, n_arrows, max_run=2, max_block=3,
     """
     rng = random.Random(seed)
     dirs = list(DIRECTIONS)
+    cy_r, cy_c = (rows - 1) / 2.0, (cols - 1) / 2.0
+    if max_dev is None:
+        max_dev = max(2.4, 1.6 + 0.1 * min(rows, cols))
     for _ in range(tries):
         board = [[EMPTY] * cols for _ in range(rows)]
         counts = {d: 0 for d in DIRECTIONS}
+        pos_sum = {d: (0.0, 0.0) for d in DIRECTIONS}   # 各方向已放置箭头的行列和（算质心用）
+        quad_cnt = {d: [0, 0, 0, 0] for d in DIRECTIONS}  # 各方向在四个象限的已放置数量
         ok = True
         for _step in range(n_arrows):
+            # 方向选择：数量最少的方向优先（保持四方向数量均衡）
+            dir_order = sorted(dirs, key=lambda d: (counts[d], rng.random()))
             added = False
-            for _try in range(step_tries):
-                r = rng.randrange(rows)
-                c = rng.randrange(cols)
-                if board[r][c] in DIRECTIONS:
+            for d in dir_order:
+                # 收集该方向的可行空位（前进方向路径上的箭头数不超过 max_path_arrows）
+                cand_pos = [(r, c) for r in range(rows) for c in range(cols)
+                            if board[r][c] == EMPTY
+                            and _path_arrow_count(board, r, c, d) <= max_path_arrows]
+                if not cand_pos:
                     continue
-                cand = [d for d in dirs if not _path_has_arrow(board, r, c, d)]
-                if not cand:
+                # 乱序性引导：剔除放置后会造成同行/同列连续同向超过 max_run 的位置
+                if max_run >= 1:
+                    cand_pos = [p for p in cand_pos
+                                if _run_ok_place(board, p[0], p[1], d, max_run)]
+                if not cand_pos:
                     continue
-                # 方向均衡：当前数量越少的方向，被选中的权重越大
-                weights = [1.0 / (counts[d] + 1) for d in cand]
-                d = rng.choices(cand, weights=weights, k=1)[0]
+                # 位置分散：在可行位置里，选择让该方向箭头
+                #   ① 质心更接近棋盘中心（避免“左箭头全在左侧、下箭头全在下部”）
+                #   ② 在四个象限分布更均匀（避免大范围只有两种箭头）
+                if counts[d] == 0:
+                    r, c = rng.choice(cand_pos)
+                else:
+                    sr, sc = pos_sum[d]
+                    cnt = counts[d]
+                    scores = []
+                    for (rr, cc) in cand_pos:
+                        nr = (sr + rr) / (cnt + 1)
+                        nc = (sc + cc) / (cnt + 1)
+                        dist = abs(nr - cy_r) + abs(nc - cy_c)
+                        q = (2 if rr >= rows // 2 else 0) + (1 if cc >= cols // 2 else 0)
+                        w_centroid = 1.0 / (1.0 + dist)
+                        w_quad = 1.0 / (quad_cnt[d][q] + 1)
+                        # 质心越居中、所在象限该方向越少，权重越大；加小随机扰动避免过于规整
+                        scores.append(w_centroid + w_quad + rng.random() * 0.08)
+                    r, c = rng.choices(cand_pos, weights=scores, k=1)[0]
                 board[r][c] = d
                 counts[d] += 1
+                pos_sum[d] = (pos_sum[d][0] + r, pos_sum[d][1] + c)
+                q = (2 if r >= rows // 2 else 0) + (1 if c >= cols // 2 else 0)
+                quad_cnt[d][q] += 1
                 added = True
                 break
             if not added:
@@ -230,6 +459,8 @@ def generate_level(rows, cols, n_arrows, max_run=2, max_block=3,
                 break
         if not ok:
             continue
+        # 方向-位置分散的局部优化：交换箭头位置，改善“聚在自己指向方向”的问题
+        board = _optimize_spread(board, max_dev, max_swaps=400)
         if solve_order(board) is None:                   # 双保险：可解性校验
             continue
         dirs_set = {ch for row in board for ch in row if ch in DIRECTIONS}
@@ -238,6 +469,8 @@ def generate_level(rows, cols, n_arrows, max_run=2, max_block=3,
         if _direction_range(board) > max_range:          # 方向数量均衡
             continue
         if not _quadrant_kinds_ok(board):                # 方向分散（避免大区域只有两种箭头）
+            continue
+        if not _direction_centroid_ok(board, max_dev):   # 方向-位置分散（避免聚在自己指向的方向）
             continue
         blocked = sum(1 for r in range(rows) for c in range(cols)
                       if board[r][c] in DIRECTIONS and _blocked(board, r, c))
@@ -270,6 +503,7 @@ def generate_challenge(seed=None):
         res = generate_level(10, 10, n, max_run=max_run, max_block=3,
                              min_blocked_ratio=0.25, min_rounds=2,
                              tries=tries, step_tries=120,
+                             max_path_arrows=1,
                              seed=rng.randrange(10 ** 9))
         if res is not None:
             return res[0], n
@@ -277,6 +511,7 @@ def generate_challenge(seed=None):
         res = generate_level(10, 10, n, max_run=3, max_block=3,
                              min_blocked_ratio=0.2, min_rounds=2,
                              tries=80, step_tries=120,
+                             max_path_arrows=1,
                              seed=rng.randrange(10 ** 9))
         if res is not None:
             return res[0], n
