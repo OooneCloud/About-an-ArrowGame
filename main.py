@@ -840,13 +840,13 @@ class App:
                                      stars=lv.stars())
             elif self.current_level_index == len(LEVELS) - 1:
                 # 最后一关（第 8 关）通关：查看总星数 / 返回主菜单
-                self._render_overlay(surface, "第 %d 关通关！" % game.level_no,
+                self._render_overlay(surface, "第 %d 关通关！" % (self.current_level_index + 1),
                                      "用时 %d 秒 · 消耗生命 %d 点" % (used_sec, used_lives),
                                      [("view", "查看总星数"), ("home", "返回主菜单")],
                                      stars=lv.stars())
             else:
                 # 普通固定关通关：下一关 / 返回主菜单
-                self._render_overlay(surface, "第 %d 关通关！" % game.level_no,
+                self._render_overlay(surface, "第 %d 关通关！" % (self.current_level_index + 1),
                                      "用时 %d 秒 · 消耗生命 %d 点" % (used_sec, used_lives),
                                      [("next", "下一关"), ("home", "返回主菜单")],
                                      stars=lv.stars())
