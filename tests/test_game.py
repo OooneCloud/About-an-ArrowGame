@@ -49,7 +49,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from game import Level, Game, solve_order, _blocked, DIRECTIONS, EMPTY
+from game import Level, Game, solve_order, _blocked, DIRECTIONS, EMPTY, \
+    generate_level, generate_challenge, _max_same_run, _max_block_same, \
+    _direction_range, _quadrant_kinds_ok
 from levels import LEVELS, MAX_MISTAKES
 
 
@@ -530,6 +532,71 @@ class TestLevels(unittest.TestCase):
                 )
                 g[r][c] = EMPTY
             self.assertTrue(all(ch not in DIRECTIONS for row in g for ch in row))
+
+
+# ---------------------------------------------------------------- 挑战关卡与乱序性
+class TestChallenge(unittest.TestCase):
+    """挑战关卡生成器与全部关卡的方向乱序性（T27 - T31）。"""
+
+    def test_t27_challenge_generated_solvable(self):
+        """T27：挑战关卡生成器返回可通关的高密度棋盘。"""
+        board, n = generate_challenge()
+        self.assertIsNotNone(board)
+        self.assertGreaterEqual(n, 50)               # 高密度（10×10 至少 50 个箭头）
+        self.assertEqual(len(board), 10)
+        self.assertEqual(len(board[0]), 10)
+        self.assertIsNotNone(solve_order(board))
+
+    def test_t28_challenge_differs_across_seeds(self):
+        """T28：不同随机种子生成的挑战关卡布局不同（真随机）。"""
+        board1, _ = generate_challenge(seed=1)
+        board2, _ = generate_challenge(seed=2)
+        self.assertNotEqual(board1, board2)
+
+    def test_t29_levels_no_long_same_run(self):
+        """T29：所有固定关卡同行/同列连续同向箭头不超过 2 个（方向打散）。"""
+        for i, grid in enumerate(LEVELS):
+            self.assertLessEqual(_max_same_run(grid), 2,
+                                 msg="关卡 %d 出现连续 3 个以上同向箭头" % (i + 1))
+
+    def test_t30_levels_no_full_same_block(self):
+        """T30：所有固定关卡任意 2×2 区域内同方向箭头不超过 3 个（不扎堆）。"""
+        for i, grid in enumerate(LEVELS):
+            self.assertLessEqual(_max_block_same(grid, 2), 3,
+                                 msg="关卡 %d 出现 2×2 全同向箭头" % (i + 1))
+
+    def test_t31_challenge_limits_config(self):
+        """T31：挑战关卡限 1 次撤销、1 次提示、3 点生命（main 层使用，这里验证 Level 参数生效）。"""
+        from levels import CHALLENGE_MISTAKES, CHALLENGE_UNDO, CHALLENGE_HINT, CHALLENGE_TIME
+        board, _ = generate_challenge(seed=7)
+        level = Level(board, max_mistakes=CHALLENGE_MISTAKES, time_limit=CHALLENGE_TIME,
+                      max_undo=CHALLENGE_UNDO, max_hint=CHALLENGE_HINT)
+        self.assertEqual(level.max_mistakes, 3)
+        self.assertEqual(level.max_undo, 1)
+        self.assertEqual(level.max_hint, 1)
+        self.assertEqual(level.time_limit, 180)
+
+    def test_t32_levels_direction_range_within_5(self):
+        """T32：所有固定关卡四种方向箭头数量极差不超过 5（方向分布均衡）。"""
+        for i, grid in enumerate(LEVELS):
+            self.assertLessEqual(_direction_range(grid), 5,
+                                 msg="关卡 %d 各方向箭头数量相差过大" % (i + 1))
+
+    def test_t32_challenge_direction_range_within_5(self):
+        """T32b：随机关卡（挑战）方向数量极差同样不超过 5。"""
+        board, _ = generate_challenge(seed=11)
+        self.assertLessEqual(_direction_range(board), 5)
+
+    def test_t33_levels_quadrant_kinds_ok(self):
+        """T33：所有固定关卡不存在“大范围区域只有两种箭头”的聚集（象限方向种类达标）。"""
+        for i, grid in enumerate(LEVELS):
+            self.assertTrue(_quadrant_kinds_ok(grid),
+                            msg="关卡 %d 某象限方向种类过少（聚集）" % (i + 1))
+
+    def test_t33_challenge_quadrant_kinds_ok(self):
+        """T33b：随机关卡同样满足象限分散性。"""
+        board, _ = generate_challenge(seed=13)
+        self.assertTrue(_quadrant_kinds_ok(board))
 
 
 if __name__ == "__main__":
