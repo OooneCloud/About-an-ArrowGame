@@ -37,7 +37,7 @@ SCREEN_W, SCREEN_H = 780, 700
 FPS = 60
 HUD_H = 64                      # 顶部信息栏高度
 
-FLY_MS_PER_CELL = 250       # 箭头飞出动画：每格耗时（毫秒），速度恒定
+FLY_MS_PER_CELL = 167       # 箭头飞出动画：每格耗时（毫秒），速度恒定（v4.0.0 起提速 50%）
 SHAKE_MS = 480              # 碰撞晃动动画时长（毫秒）
 POPUP_MS = 900              # 提示文字停留时长（毫秒）
 SOLVE_STEP = 0.35           # AI 求解：每步间隔（秒）
@@ -288,6 +288,7 @@ class App:
         self.solve_idx = 0
         self.solve_timer = 0.0
         self._prev_state = None           # 上一帧游戏状态（用于检测通关/失败瞬间）
+        self._win_sound_played = False    # 本关“通关面板首次显示”时播放成功音效（与面板同步）
         self.snd_fly = _make_swish_sound()   # 箭头飞出音效（程序生成）
         self.snd_win = _make_win_sound()     # 通关成功音效
         self.snd_lose = _make_lose_sound()   # 通关失败音效
@@ -317,6 +318,7 @@ class App:
         self.is_challenge = False
         self.current_level_index = i
         self._prev_state = Game.PLAYING
+        self._win_sound_played = False
         self.fly_anims.clear()
         self.shake_anims.clear()
         self.popups.clear()
@@ -352,6 +354,7 @@ class App:
         ])
         self.is_challenge = True
         self._prev_state = Game.PLAYING
+        self._win_sound_played = False
         self.fly_anims.clear()
         self.shake_anims.clear()
         self.popups.clear()
@@ -413,11 +416,10 @@ class App:
                 self._advance_solve(dt, now)     # AI 求解期间暂停倒计时
             else:
                 self.game.tick(dt)               # 限时倒计时（仅游戏中状态生效）
-            # 检测通关/失败瞬间：播放音效，并记录通关解锁与星级
+            # 检测通关/失败瞬间（通关音效改在“通关面板首次显示”时播放，与面板同步；
+            # 失败界面立即弹出，失败音效在此播放，与界面同时出现）
             st = self.game.state
             if st == Game.LEVEL_CLEAR and self._prev_state != Game.LEVEL_CLEAR:
-                if self.snd_win is not None:
-                    self.snd_win.play()          # 通关成功音效
                 if not self.is_challenge:
                     self.completed.add(self.current_level_index)
                     self.stars[self.current_level_index] = self.game.current.stars()
@@ -509,6 +511,7 @@ class App:
                 # 挑战关卡通关：可再来一局或返回首页
                 if self.buttons.get("retry") and self.buttons["retry"].rect.collidepoint(pos):
                     self.game.restart_level()
+                    self._win_sound_played = False
                     self.fly_anims.clear()
                     self.shake_anims.clear()
                     self.popups.clear()
@@ -529,6 +532,7 @@ class App:
         elif self.game.state == Game.FAILED:
             if self.buttons.get("retry") and self.buttons["retry"].rect.collidepoint(pos):
                 self.game.restart_level()
+                self._win_sound_played = False
                 self.fly_anims.clear()
                 self.shake_anims.clear()
                 self.popups.clear()
@@ -829,6 +833,10 @@ class App:
         # ---- 通关 / 失败 / 全部通关 遮罩 ----
         # 通关/全部通关时等最后一个箭头完全飞出棋盘后再弹出结果面板
         if game.state == Game.LEVEL_CLEAR and not self.fly_anims:
+            if not self._win_sound_played:
+                if self.snd_win is not None:
+                    self.snd_win.play()          # 通关成功音效（与通关面板同时出现）
+                self._win_sound_played = True
             lv = game.current
             used_sec = math.ceil(lv.elapsed)
             used_lives = lv.max_mistakes - lv.mistakes
