@@ -38,6 +38,7 @@ FPS = 60
 HUD_H = 64                      # 顶部信息栏高度
 
 FLY_MS_PER_CELL = 167       # 箭头飞出动画：每格耗时（毫秒），速度恒定（v4.0.0 起提速 50%）
+FLY_FADE_MS = 300          # 箭头飞出棋盘边缘后的渐变消失时长（毫秒，v4.1.0 新增）
 SHAKE_MS = 480              # 碰撞晃动动画时长（毫秒）
 POPUP_MS = 900              # 提示文字停留时长（毫秒）
 SOLVE_STEP = 0.35           # AI 求解：每步间隔（秒）
@@ -237,32 +238,43 @@ class _RectHit:
 
 
 # ---------------------------------------------------------------- 箭头绘制
-def draw_arrow(surface, center, size, direction, color, offset=(0, 0)):
+def draw_arrow(surface, center, size, direction, color, offset=(0, 0), alpha=255):
     """
     在中心点 (center) 绘制一个箭头。
     size 为格子边长的一半左右，方向由 direction 指定，offset 为额外位移（动画用）。
     箭头由“箭杆(粗线段) + 箭头(三角形)”组成，全部用 pygame 基本图形绘制。
+    alpha < 255 时先画到透明临时画布再按透明度贴回（飞出棋盘后的渐变消失用）。
     """
     cx, cy = center[0] + offset[0], center[1] + offset[1]
     s = size * 0.38
     w = max(int(s * 0.42), 4)  # 箭杆粗细
 
+    if alpha >= 255:
+        target, ox, oy = surface, cx, cy
+    else:
+        target = pygame.Surface((int(size * 4), int(size * 4)), pygame.SRCALPHA)
+        ox = oy = size * 2
+
     if direction == ">":
-        head = [(cx + s, cy), (cx - s * 0.2, cy - s * 0.62), (cx - s * 0.2, cy + s * 0.62)]
-        pygame.draw.line(surface, color, (cx - s, cy), (cx + s * 0.2, cy), w)
-        pygame.draw.polygon(surface, color, head)
+        head = [(ox + s, oy), (ox - s * 0.2, oy - s * 0.62), (ox - s * 0.2, oy + s * 0.62)]
+        pygame.draw.line(target, color, (ox - s, oy), (ox + s * 0.2, oy), w)
+        pygame.draw.polygon(target, color, head)
     elif direction == "<":
-        head = [(cx - s, cy), (cx + s * 0.2, cy - s * 0.62), (cx + s * 0.2, cy + s * 0.62)]
-        pygame.draw.line(surface, color, (cx + s, cy), (cx - s * 0.2, cy), w)
-        pygame.draw.polygon(surface, color, head)
+        head = [(ox - s, oy), (ox + s * 0.2, oy - s * 0.62), (ox + s * 0.2, oy + s * 0.62)]
+        pygame.draw.line(target, color, (ox + s, oy), (ox - s * 0.2, oy), w)
+        pygame.draw.polygon(target, color, head)
     elif direction == "^":
-        head = [(cx, cy - s), (cx - s * 0.62, cy + s * 0.2), (cx + s * 0.62, cy + s * 0.2)]
-        pygame.draw.line(surface, color, (cx, cy + s), (cx, cy - s * 0.2), w)
-        pygame.draw.polygon(surface, color, head)
+        head = [(ox, oy - s), (ox - s * 0.62, oy + s * 0.2), (ox + s * 0.62, oy + s * 0.2)]
+        pygame.draw.line(target, color, (ox, oy + s), (ox, oy - s * 0.2), w)
+        pygame.draw.polygon(target, color, head)
     elif direction == "v":
-        head = [(cx, cy + s), (cx - s * 0.62, cy - s * 0.2), (cx + s * 0.62, cy - s * 0.2)]
-        pygame.draw.line(surface, color, (cx, cy - s), (cx, cy + s * 0.2), w)
-        pygame.draw.polygon(surface, color, head)
+        head = [(ox, oy + s), (ox - s * 0.62, oy - s * 0.2), (ox + s * 0.62, oy - s * 0.2)]
+        pygame.draw.line(target, color, (ox, oy - s), (ox, oy + s * 0.2), w)
+        pygame.draw.polygon(target, color, head)
+
+    if alpha < 255:
+        target.set_alpha(alpha)
+        surface.blit(target, (cx - size * 2, cy - size * 2))
 
 
 # ---------------------------------------------------------------- 应用主体
@@ -427,7 +439,7 @@ class App:
                 if self.snd_lose is not None:
                     self.snd_lose.play()         # 通关失败音效
             self._prev_state = st
-        self.fly_anims = [a for a in self.fly_anims if now - a["t0"] < a["dur"]]
+        self.fly_anims = [a for a in self.fly_anims if now - a["t0"] < a["dur"] + FLY_FADE_MS]
         self.shake_anims = [a for a in self.shake_anims if now - a["t0"] < SHAKE_MS]
         self.popups = [p for p in self.popups if now - p["t0"] < POPUP_MS]
 
@@ -780,13 +792,19 @@ class App:
                     center = (ox + c * cell + cell // 2, oy + r * cell + cell // 2)
                     draw_arrow(surface, center, cell // 2, ch, DIR_COLORS[ch])
 
-        # 飞出动画（沿方向滑出棋盘，飞越整段距离到棋盘边缘后消失）
+        # 飞出动画（沿方向滑出棋盘，到棋盘边缘后再渐变淡出 FLY_FADE_MS 消失）
         for a in self.fly_anims:
-            p = min((now - a["t0"]) / a["dur"], 1.0)
+            elapsed = now - a["t0"]
+            p1 = min(elapsed / a["dur"], 1.0)          # 飞行进度
             dr, dc = DIRECTIONS[a["d"]]
-            off = (dc * cell * a["dist"] * p, dr * cell * a["dist"] * p)
+            off = (dc * cell * a["dist"] * p1, dr * cell * a["dist"] * p1)
             center = (ox + a["c"] * cell + cell // 2, oy + a["r"] * cell + cell // 2)
-            draw_arrow(surface, center, cell // 2, a["d"], DIR_COLORS[a["d"]], off)
+            if elapsed > a["dur"]:                       # 已到棋盘边缘，进入淡出
+                p2 = min((elapsed - a["dur"]) / FLY_FADE_MS, 1.0)
+                alpha = int(255 * (1 - p2))
+            else:
+                alpha = 255
+            draw_arrow(surface, center, cell // 2, a["d"], DIR_COLORS[a["d"]], off, alpha)
 
         # 提示高亮：金色闪烁边框
         if self.hint_cell is not None:
